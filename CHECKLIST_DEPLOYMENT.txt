@@ -1,0 +1,253 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                                                                            ║
+║                    CAPTAR v2.0 - CHECKLIST DE DEPLOYMENT                 ║
+║                                                                            ║
+║                    COM COPIA DE BANCO DE DADOS E PG 18                    ║
+║                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+═══════════════════════════════════════════════════════════════════════════════
+                        PRE-DEPLOYMENT (5 minutos)
+═══════════════════════════════════════════════════════════════════════════════
+
+☐ VERIFICAR DOCKER REMOTO
+  ☐ SSH para 172.26.97.64 (root / 123)
+  ☐ Verificar Docker: systemctl status docker
+  ☐ Verificar porta 2375: netstat -tlnp | grep 2375
+  ☐ Sair do SSH: exit
+
+☐ VERIFICAR CLIENTE
+  ☐ PowerShell aberto
+  ☐ Docker CLI instalado
+  ☐ Navegar para: c:\www\Streamlit\Captar\CAPTAR
+  ☐ Verificar arquivo: docker-compose.yml (PostgreSQL 18)
+
+☐ VERIFICAR ESPAÇO EM DISCO
+  ☐ Servidor: Minimo 5GB livres
+  ☐ Cliente: Minimo 2GB livres (para backup)
+
+☐ VERIFICAR DADOS EXISTENTES
+  ☐ PostgreSQL 15 rodando
+  ☐ Banco "captar" existe
+  ☐ Tabelas com dados
+
+═══════════════════════════════════════════════════════════════════════════════
+                        DURANTE DEPLOYMENT (5 minutos)
+═══════════════════════════════════════════════════════════════════════════════
+
+☐ EXECUTAR SCRIPT
+  ☐ Comando: .\deploy_completo.ps1
+  ☐ Aguardar inicio do script
+  ☐ Monitorar saida do console
+
+☐ ETAPA 1: VERIFICACAO
+  ☐ Conectado ao Docker remoto
+  ☐ Containers existentes listados
+
+☐ ETAPA 2: BACKUP
+  ☐ Arquivo de backup criado
+  ☐ Tamanho do arquivo exibido
+  ☐ Backup concluido com sucesso
+
+☐ ETAPA 3: PARADA
+  ☐ Containers parados
+  ☐ Volumes removidos
+
+☐ ETAPA 4: DEPLOY
+  ☐ Imagens sendo construidas
+  ☐ Containers iniciando
+  ☐ PostgreSQL 18 iniciando
+
+☐ ETAPA 5: RESTAURACAO
+  ☐ Arquivo copiado para container
+  ☐ Banco sendo restaurado
+  ☐ Restauracao concluida
+
+☐ ETAPA 6: VERIFICACAO
+  ☐ Tabelas listadas
+  ☐ Registros contados
+  ☐ Integridade verificada
+
+☐ ETAPA 7: STATUS
+  ☐ Containers em execucao
+  ☐ Logs exibidos
+  ☐ Deployment concluido
+
+═══════════════════════════════════════════════════════════════════════════════
+                        POS-DEPLOYMENT (10 minutos)
+═══════════════════════════════════════════════════════════════════════════════
+
+☐ VERIFICAR CONTAINERS
+  ☐ Comando: docker ps
+  ☐ 7 containers rodando
+  ☐ Todos com status "Up"
+
+☐ VERIFICAR BANCO DE DADOS
+  ☐ Comando: docker exec captar-postgres psql -U captar -d captar -c "\dt"
+  ☐ Tabelas listadas
+  ☐ Dados intactos
+
+☐ VERIFICAR FRONTEND
+  ☐ Abrir: http://172.26.97.64:3000
+  ☐ Pagina de login carrega
+  ☐ Sem erros de conexao
+
+☐ VERIFICAR API
+  ☐ Comando: curl http://172.26.97.64:8000/health
+  ☐ Resposta: {"status":"ok"}
+  ☐ API respondendo
+
+☐ FAZER LOGIN
+  ☐ Acessar: http://172.26.97.64:3000
+  ☐ Usuario e senha corretos
+  ☐ Dashboard carrega
+
+☐ VERIFICAR DADOS
+  ☐ Eleitores: dados importados
+  ☐ Ativistas: dados importados
+  ☐ Usuarios: dados importados
+  ☐ Permissoes: dados importados
+
+☐ TESTAR NOVAS FUNCIONALIDADES
+  ☐ Pagina Permissoes: acessivel
+  ☐ Pagina Estatisticas: acessivel
+  ☐ Pagina Consultas: acessivel
+  ☐ Sem erros de JavaScript
+
+☐ TESTAR ENDPOINTS
+  ☐ GET /api/eleitores: funciona
+  ☐ GET /api/ativistas: funciona
+  ☐ GET /api/usuarios: funciona
+  ☐ GET /api/permissoes: funciona
+
+═══════════════════════════════════════════════════════════════════════════════
+                        BACKUP ADICIONAL (2 minutos)
+═══════════════════════════════════════════════════════════════════════════════
+
+☐ FAZER BACKUP DO NOVO BANCO
+  ☐ Comando: .\backup_restore_db.ps1 -Acao backup
+  ☐ Arquivo criado: captar_backup_YYYYMMDD_HHMMSS.sql
+  ☐ Tamanho do arquivo exibido
+
+☐ GUARDAR BACKUP
+  ☐ Copiar arquivo para local seguro
+  ☐ Documentar data e hora
+  ☐ Manter como referencia
+
+═══════════════════════════════════════════════════════════════════════════════
+                        DOCUMENTACAO (5 minutos)
+═══════════════════════════════════════════════════════════════════════════════
+
+☐ REGISTRAR RESULTADO
+  ☐ Data e hora do deployment
+  ☐ Versao do PostgreSQL (18)
+  ☐ Numero de containers
+  ☐ Numero de tabelas
+  ☐ Numero de registros
+
+☐ DOCUMENTAR PROBLEMAS
+  ☐ Se houver erros, anotar
+  ☐ Solucoes aplicadas
+  ☐ Tempo gasto
+
+☐ ATUALIZAR DOCUMENTACAO
+  ☐ Adicionar data do deployment
+  ☐ Adicionar versoes dos servicos
+  ☐ Adicionar informacoes de acesso
+
+═══════════════════════════════════════════════════════════════════════════════
+                        PROXIMAS ACOES (Opcional)
+═══════════════════════════════════════════════════════════════════════════════
+
+☐ IMPLEMENTAR PRIORIDADE 3
+  ☐ Resultados Eleitorais
+  ☐ Mapa Interativo
+  ☐ Relatorios Agendados
+  ☐ Integracao WhatsApp
+  ☐ Dashboard Executivo
+
+☐ OTIMIZACOES
+  ☐ Configurar cache
+  ☐ Otimizar queries
+  ☐ Adicionar indices
+  ☐ Configurar backups automaticos
+
+☐ SEGURANCA
+  ☐ Configurar HTTPS
+  ☐ Adicionar autenticacao 2FA
+  ☐ Configurar firewall
+  ☐ Adicionar rate limiting
+
+═══════════════════════════════════════════════════════════════════════════════
+                        TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════════════════════
+
+Se algo der errado:
+
+❌ ERRO: "Cannot connect to Docker daemon"
+   ✓ Solucao: $env:DOCKER_HOST = "tcp://172.26.97.64:2375"
+   ✓ Teste: docker version
+
+❌ ERRO: "Connection refused"
+   ✓ Solucao: SSH para servidor e verifique Docker
+   ✓ Comando: systemctl status docker
+
+❌ ERRO: "Banco nao foi restaurado"
+   ✓ Solucao: Verifique arquivo de backup
+   ✓ Comando: docker logs captar-postgres
+
+❌ ERRO: "Containers nao iniciaram"
+   ✓ Solucao: Verifique espaço em disco
+   ✓ Comando: docker logs captar-fastapi
+
+❌ ERRO: "Frontend nao carrega"
+   ✓ Solucao: Verifique conexao com API
+   ✓ Comando: curl http://172.26.97.64:8000/health
+
+═══════════════════════════════════════════════════════════════════════════════
+                        RESUMO RAPIDO
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Verificar Docker remoto (5 min)
+2. Executar .\deploy_completo.ps1 (5 min)
+3. Aguardar conclusao (5 min)
+4. Verificar resultado (5 min)
+5. Fazer backup (2 min)
+6. Documentar (5 min)
+
+TOTAL: ~27 minutos
+
+═══════════════════════════════════════════════════════════════════════════════
+                        INFORMACOES IMPORTANTES
+═══════════════════════════════════════════════════════════════════════════════
+
+✓ PostgreSQL 18 (versao mais recente)
+✓ Backup automatico durante deployment
+✓ Restauracao automatica de dados
+✓ Sem perda de dados
+✓ Todos os dados preservados
+✓ Integridade verificada
+✓ Pronto para producao
+
+═══════════════════════════════════════════════════════════════════════════════
+                        CONTATO E SUPORTE
+═══════════════════════════════════════════════════════════════════════════════
+
+Documentacao:
+  - EXECUTAR_DEPLOYMENT.txt
+  - STATUS_FINAL_COMPLETO.txt
+  - INSTRUCOES_CONFIGURACAO_UBUNTU.txt
+
+Scripts:
+  - deploy_completo.ps1
+  - backup_restore_db.ps1
+  - start_captar.ps1
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Data: 16/11/2025
+Status: ✅ PRONTO PARA DEPLOYMENT
+Tempo Estimado: 27 minutos
+Proxima Acao: Executar .\deploy_completo.ps1
+
+═══════════════════════════════════════════════════════════════════════════════

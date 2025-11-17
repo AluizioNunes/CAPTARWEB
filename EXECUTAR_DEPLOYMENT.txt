@@ -1,0 +1,244 @@
+═══════════════════════════════════════════════════════════════════════════════
+                    CAPTAR v2.0 - EXECUTAR DEPLOYMENT COMPLETO
+                          COM COPIA DE BANCO DE DADOS
+═══════════════════════════════════════════════════════════════════════════════
+
+RESUMO:
+  - Fazer backup do banco existente
+  - Atualizar para PostgreSQL 18
+  - Deploy com Docker
+  - Restaurar banco de dados
+  - Verificar integridade
+
+═══════════════════════════════════════════════════════════════════════════════
+                        PRE-REQUISITOS
+═══════════════════════════════════════════════════════════════════════════════
+
+✓ Docker remoto configurado em 172.26.97.64:2375
+✓ PostgreSQL 15 com dados existentes
+✓ PowerShell com Docker CLI
+✓ Acesso SSH ao servidor (root / 123)
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PASSO 1: CONFIGURAR DOCKER REMOTO
+═══════════════════════════════════════════════════════════════════════════════
+
+Se ainda nao configurou Docker remoto, execute:
+
+1. Abra terminal SSH:
+   ssh root@172.26.97.64
+   Senha: 123
+
+2. Edite /etc/docker/daemon.json:
+   nano /etc/docker/daemon.json
+
+3. Adicione TCP 2375:
+   {
+     "hosts": [
+       "unix:///var/run/docker.sock",
+       "tcp://0.0.0.0:2375"
+     ]
+   }
+
+4. Reinicie Docker:
+   systemctl daemon-reload
+   systemctl restart docker
+
+5. Saia do SSH:
+   exit
+
+6. Teste conexao:
+   $env:DOCKER_HOST = "tcp://172.26.97.64:2375"
+   docker version
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PASSO 2: EXECUTAR DEPLOYMENT COMPLETO
+═══════════════════════════════════════════════════════════════════════════════
+
+No PowerShell, navegue para o projeto:
+
+cd c:\www\Streamlit\Captar\CAPTAR
+
+Execute o script de deployment:
+
+.\deploy_completo.ps1
+
+O script vai:
+  1. Conectar ao Docker remoto
+  2. Fazer backup do banco existente
+  3. Parar containers antigos
+  4. Iniciar novo deploy com PostgreSQL 18
+  5. Restaurar banco de dados
+  6. Verificar integridade
+  7. Mostrar status final
+
+Tempo estimado: 3-5 minutos
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PASSO 3: VERIFICAR RESULTADO
+═══════════════════════════════════════════════════════════════════════════════
+
+Apos o script terminar, verifique:
+
+1. Containers rodando:
+   docker ps
+
+   Resultado esperado:
+   captar-postgres
+   captar-mongodb
+   captar-migrations
+   captar-fastapi
+   captar-nestjs
+   captar-frontend
+   captar-nginx
+
+2. Banco de dados:
+   docker exec captar-postgres psql -U captar -d captar -c "\dt"
+
+   Resultado esperado:
+   Lista de tabelas do banco original
+
+3. Registros:
+   docker exec captar-postgres psql -U captar -d captar -c "SELECT COUNT(*) FROM usuarios;"
+
+   Resultado esperado:
+   Numero de registros do banco original
+
+4. Frontend:
+   Abra no navegador: http://172.26.97.64:3000
+
+   Resultado esperado:
+   Pagina de login do CAPTAR
+
+5. API:
+   curl http://172.26.97.64:8000/health
+
+   Resultado esperado:
+   {"status":"ok","version":"2.0.0"}
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PASSO 4: FAZER LOGIN E TESTAR
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Acesse: http://172.26.97.64:3000
+
+2. Faca login com suas credenciais
+
+3. Verifique dados:
+   - Eleitores
+   - Ativistas
+   - Usuarios
+   - Permissoes
+
+4. Teste novas funcionalidades:
+   - Pagina de Permissoes
+   - Pagina de Estatisticas
+   - Pagina de Consultas
+
+5. Teste API:
+   curl -X GET http://172.26.97.64:8000/api/eleitores \
+     -H "Authorization: Bearer TOKEN"
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PASSO 5: FAZER BACKUP ADICIONAL
+═══════════════════════════════════════════════════════════════════════════════
+
+Apos verificar que tudo esta funcionando, faca um backup adicional:
+
+.\backup_restore_db.ps1 -Acao backup
+
+Resultado:
+  Arquivo: captar_backup_YYYYMMDD_HHMMSS.sql
+
+Guarde este arquivo em local seguro!
+
+═══════════════════════════════════════════════════════════════════════════════
+                    TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════════════════════
+
+Erro: "Cannot connect to Docker daemon"
+  - Verifique se Docker remoto esta configurado
+  - Execute: $env:DOCKER_HOST = "tcp://172.26.97.64:2375"
+  - Teste: docker version
+
+Erro: "Connection refused"
+  - SSH para servidor e verifique Docker
+  - systemctl status docker
+  - netstat -tlnp | grep 2375
+
+Erro: "Banco nao foi restaurado"
+  - Verifique arquivo de backup
+  - Verifique permissoes do usuario captar
+  - Verifique logs: docker logs captar-postgres
+
+Erro: "Containers nao iniciaram"
+  - Verifique espa em disco
+  - Verifique logs: docker logs captar-fastapi
+  - Verifique conexao com banco
+
+═══════════════════════════════════════════════════════════════════════════════
+                    SCRIPTS DISPONIVEIS
+═══════════════════════════════════════════════════════════════════════════════
+
+1. deploy_completo.ps1
+   - Deployment completo com backup e restauracao
+   - Tempo: 3-5 minutos
+   - Uso: .\deploy_completo.ps1
+
+2. backup_restore_db.ps1
+   - Backup ou restauracao manual
+   - Uso: .\backup_restore_db.ps1 -Acao backup
+   - Uso: .\backup_restore_db.ps1 -Acao restore
+
+3. start_captar.ps1
+   - Iniciar containers sem backup
+   - Tempo: 1-2 minutos
+   - Uso: .\start_captar.ps1
+
+4. limpar_npm.ps1
+   - Limpar cache npm
+   - Tempo: 2-3 minutos
+   - Uso: .\limpar_npm.ps1
+
+═══════════════════════════════════════════════════════════════════════════════
+                    INFORMACOES IMPORTANTES
+═══════════════════════════════════════════════════════════════════════════════
+
+PostgreSQL 18:
+  - Versao mais recente
+  - Melhor performance
+  - Compativel com PostgreSQL 15
+
+Backup Automatico:
+  - Arquivo: captar_backup_YYYYMMDD_HHMMSS.sql
+  - Local: Diretorio do projeto
+  - Tamanho: Depende do banco
+
+Restauracao:
+  - Automatica durante deployment
+  - Manual com backup_restore_db.ps1
+  - Sem perda de dados
+
+Dados Preservados:
+  - Todas as tabelas
+  - Todos os registros
+  - Todas as permissoes
+  - Todas as configuracoes
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PROXIMAS ACOES
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Executar deploy_completo.ps1
+2. Verificar containers
+3. Testar frontend
+4. Testar API
+5. Fazer backup adicional
+6. Documentar resultado
+7. Implementar Prioridade 3
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Data: 16/11/2025
+Status: Pronto para execucao
+Tempo Estimado: 20 minutos (incluindo verificacoes)

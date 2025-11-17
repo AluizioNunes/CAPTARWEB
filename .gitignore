@@ -1,0 +1,8 @@
+node_modules/
+dist/
+Frontend/node_modules/
+Frontend/dist/
+Backend/NestJS/node_modules/
+Backend/FastAPI/__pycache__/
+*.pyc
+.env

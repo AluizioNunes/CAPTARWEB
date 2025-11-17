@@ -1,0 +1,224 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                                                                            ║
+║                    🚀 CAPTAR - QUICK START GUIDE 🚀                       ║
+║                                                                            ║
+║                   Sistema de Gestão Eleitoral v1.0.0                      ║
+║                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+📋 PASSO 1: VERIFICAR PRÉ-REQUISITOS
+═══════════════════════════════════════════════════════════════════════════
+
+✓ Docker instalado?
+  Comando: docker --version
+
+✓ Docker Compose instalado?
+  Comando: docker-compose --version
+
+Se algum não estiver instalado, visite:
+  - Docker: https://www.docker.com/products/docker-desktop
+  - Docker Compose: https://docs.docker.com/compose/install/
+
+
+🚀 PASSO 2: INICIAR A APLICAÇÃO
+═══════════════════════════════════════════════════════════════════════════
+
+Abra o terminal e execute:
+
+  cd c:/www/Streamlit/Captar/CAPTAR
+  docker-compose up -d
+
+Aguarde 30-60 segundos para todos os containers iniciarem.
+
+
+✅ PASSO 3: VERIFICAR STATUS
+═══════════════════════════════════════════════════════════════════════════
+
+Verifique se todos os containers estão rodando:
+
+  docker-compose ps
+
+Você deve ver 6 containers com status "Up":
+  - captar-frontend
+  - captar-fastapi
+  - captar-nestjs
+  - captar-nginx
+  - captar-postgres
+  - captar-mongodb
+
+
+🌐 PASSO 4: ACESSAR A APLICAÇÃO
+═══════════════════════════════════════════════════════════════════════════
+
+Abra seu navegador e acesse:
+
+  Frontend:     http://localhost:3000
+  FastAPI:      http://localhost:8000
+  FastAPI Docs: http://localhost:8000/docs
+  NestJS:       http://localhost:3001
+  Nginx:        http://localhost
+
+
+🔐 PASSO 5: FAZER LOGIN
+═══════════════════════════════════════════════════════════════════════════
+
+Use as credenciais padrão:
+
+  Usuário: admin
+  Senha:   123456
+
+
+📊 PASSO 6: EXPLORAR O DASHBOARD
+═══════════════════════════════════════════════════════════════════════════
+
+Após fazer login, você verá:
+
+  ✓ Dashboard com estatísticas
+  ✓ Gráficos interativos (ECharts)
+  ✓ Top 10 ativistas, usuários, supervisores, coordenadores
+  ✓ Distribuição por bairros e zonas
+  ✓ Menu lateral com navegação
+  ✓ Páginas de CRUD para eleitores, ativistas e usuários
+
+
+🛠️ COMANDOS ÚTEIS
+═══════════════════════════════════════════════════════════════════════════
+
+Ver logs em tempo real:
+  docker-compose logs -f
+
+Parar a aplicação:
+  docker-compose down
+
+Parar e remover volumes:
+  docker-compose down -v
+
+Reconstruir containers:
+  docker-compose up -d --build
+
+Executar comando em container:
+  docker-compose exec [service] [command]
+
+Exemplo - Acessar PostgreSQL:
+  docker-compose exec postgres psql -U captar -d captar
+
+
+📁 ESTRUTURA DE ARQUIVOS
+═══════════════════════════════════════════════════════════════════════════
+
+CAPTAR/
+├── Frontend/              React + Vite + TypeScript
+├── Backend/
+│   ├── FastAPI/          Python + PostgreSQL
+│   └── NestJS/           Node.js + MongoDB
+├── docker-compose.yml    Orquestração
+├── nginx.conf           Reverse proxy
+├── .env                 Variáveis de ambiente
+├── README.md            Documentação completa
+├── SETUP.md             Guia de setup
+└── QUICK_START.txt      Este arquivo
+
+
+🔗 ARQUITETURA
+═══════════════════════════════════════════════════════════════════════════
+
+Frontend (React)
+    ↓
+Nginx (Reverse Proxy)
+    ├→ FastAPI (PostgreSQL)
+    └→ NestJS (MongoDB)
+
+
+📊 ENDPOINTS PRINCIPAIS
+═══════════════════════════════════════════════════════════════════════════
+
+Autenticação:
+  POST   /api/auth/login
+  GET    /api/auth/me
+  POST   /api/auth/logout
+
+Eleitores:
+  GET    /api/eleitores
+  POST   /api/eleitores
+  GET    /api/eleitores/{id}
+  PUT    /api/eleitores/{id}
+  DELETE /api/eleitores/{id}
+
+Dashboard:
+  GET    /api/dashboard/stats
+  GET    /api/dashboard/top-ativistas
+  GET    /api/dashboard/top-usuarios
+  GET    /api/dashboard/top-supervisores
+  GET    /api/dashboard/top-coordenadores
+  GET    /api/dashboard/top-bairros
+  GET    /api/dashboard/top-zonas
+
+
+🐛 TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════════════════
+
+❌ Porta já em uso?
+   Windows: netstat -ano | findstr :3000
+   Linux:   lsof -i :3000
+
+❌ Containers não iniciam?
+   docker-compose logs
+   docker-compose up -d --build
+
+❌ Erro de conexão com banco?
+   docker-compose restart
+   docker-compose logs postgres
+
+❌ Frontend não carrega?
+   Limpe cache: Ctrl+Shift+Delete
+   Recarregue: Ctrl+R ou Cmd+R
+
+
+📚 DOCUMENTAÇÃO COMPLETA
+═══════════════════════════════════════════════════════════════════════════
+
+Para documentação detalhada, consulte:
+  - README.md
+  - SETUP.md
+  - RESUMO_CRIACAO.md
+
+
+💡 DICAS
+═══════════════════════════════════════════════════════════════════════════
+
+✓ Mantenha os containers rodando em background
+✓ Use "docker-compose logs -f" para debug
+✓ Acesse http://localhost:8000/docs para testar APIs
+✓ Verifique .env para configurações
+✓ Todos os dados são persistidos em volumes Docker
+
+
+🎉 PRONTO!
+═══════════════════════════════════════════════════════════════════════════
+
+Sua aplicação CAPTAR está rodando!
+
+Próximos passos:
+  1. Explore o dashboard
+  2. Teste as funcionalidades
+  3. Consulte a documentação para customizações
+  4. Configure seu ambiente de produção
+
+
+📞 SUPORTE
+═══════════════════════════════════════════════════════════════════════════
+
+Para problemas ou dúvidas:
+  1. Verifique os logs: docker-compose logs
+  2. Consulte README.md
+  3. Verifique SETUP.md
+  4. Analise .env para configurações
+
+
+═══════════════════════════════════════════════════════════════════════════
+
+Versão: 1.0.0
+Data: 16/11/2025
+Status: ✅ Pronto para uso
+
+═══════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,214 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                                                                            ║
+║                    🚀 CAPTAR v2.0 - PRÓXIMAS AÇÕES 🚀                     ║
+║                                                                            ║
+║                         DEPLOYMENT EM PROGRESSO                           ║
+║                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+═══════════════════════════════════════════════════════════════════════════════
+                        ✅ JÁ CONCLUÍDO (60%)
+═══════════════════════════════════════════════════════════════════════════════
+
+✅ Limpeza NPM - CONCLUÍDO
+   - Cache limpo
+   - node_modules removido
+   - Espaço liberado
+
+✅ Instalação NPM - CONCLUÍDO
+   - 311 packages instalados
+   - Frontend pronto
+   - Tempo: 1m 47s
+
+✅ Cópia de Arquivos - CONCLUÍDO
+   - main_extended.py → main.py
+   - api_extended.ts → api.ts
+   - Backend e Frontend prontos
+
+═══════════════════════════════════════════════════════════════════════════════
+                    ⏳ PRÓXIMA AÇÃO (OBRIGATÓRIA)
+═══════════════════════════════════════════════════════════════════════════════
+
+🐳 INSTALAR DOCKER DESKTOP
+
+Por quê?
+  - Docker Desktop é necessário para rodar os containers
+  - Sem Docker, não é possível fazer deploy
+  - Todos os serviços dependem de Docker
+
+Como?
+  1. Abra: https://www.docker.com/products/docker-desktop
+  2. Clique: "Download for Windows"
+  3. Execute: Docker Desktop Installer.exe
+  4. Siga: As instruções do assistente
+  5. Marque: ✅ Add Docker to PATH
+  6. Aguarde: Inicialização (alguns minutos)
+
+Tempo Estimado: 15-30 minutos
+
+═══════════════════════════════════════════════════════════════════════════════
+                    APÓS INSTALAR DOCKER DESKTOP
+═══════════════════════════════════════════════════════════════════════════════
+
+PASSO 1: Abrir novo PowerShell
+  - Feche o terminal atual
+  - Abra novo terminal PowerShell
+  - Isso garante que Docker está no PATH
+
+PASSO 2: Verificar Docker
+  docker --version
+  docker-compose --version
+
+  Resultado esperado:
+  Docker version 20.10.x, build xxxxx
+  Docker Compose version 2.x.x, build xxxxx
+
+PASSO 3: Navegar para o projeto
+  cd c:\www\Streamlit\Captar\CAPTAR
+
+PASSO 4: Parar containers antigos
+  docker-compose down -v
+
+PASSO 5: Build e Deploy
+  docker-compose up -d --build
+
+  Isso vai:
+  - Fazer build das imagens
+  - Iniciar 7 containers
+  - Executar migrations automaticamente
+  - Tempo: 5-10 minutos
+
+PASSO 6: Verificar Migrations
+  docker-compose logs migrations
+
+  Resultado esperado:
+  "Migrations completed"
+
+PASSO 7: Verificar FastAPI
+  docker-compose logs fastapi
+
+  Resultado esperado:
+  "Application startup complete"
+
+PASSO 8: Testar Health Check
+  curl http://localhost:8000/health
+
+  Resultado esperado:
+  {"status":"ok","version":"2.0.0"}
+
+PASSO 9: Acessar Frontend
+  Abra no navegador: http://localhost:3000
+
+  Resultado esperado:
+  Página de login do CAPTAR
+
+═══════════════════════════════════════════════════════════════════════════════
+                        📋 CHECKLIST FINAL
+═══════════════════════════════════════════════════════════════════════════════
+
+Antes de fazer deploy:
+  ☐ Docker Desktop instalado
+  ☐ WSL 2 configurado (se necessário)
+  ☐ Docker no PATH
+  ☐ Novo PowerShell aberto
+  ☐ Espaço em disco verificado (5GB+)
+
+Durante o deploy:
+  ☐ docker-compose down -v executado
+  ☐ docker-compose up -d --build executado
+  ☐ Migrations completadas
+  ☐ FastAPI iniciado
+  ☐ Frontend acessível
+
+Após o deploy:
+  ☐ Health check passou
+  ☐ Frontend carrega
+  ☐ Login funciona
+  ☐ Novas páginas acessíveis
+  ☐ Banco de dados conectado
+
+═══════════════════════════════════════════════════════════════════════════════
+                        🎯 TIMELINE ESTIMADA
+═══════════════════════════════════════════════════════════════════════════════
+
+Agora:                  Instalar Docker Desktop (15-30 min)
++30 min:                Abrir novo PowerShell
++35 min:                Executar docker-compose down -v
++40 min:                Executar docker-compose up -d --build
++50 min:                Verificar migrations
++55 min:                Testar endpoints
++60 min:                ✅ DEPLOYMENT COMPLETO
+
+Total Estimado: 1 hora
+
+═══════════════════════════════════════════════════════════════════════════════
+                        📞 SUPORTE
+═══════════════════════════════════════════════════════════════════════════════
+
+Documentos de Referência:
+  1. INSTALACAO_DOCKER_DESKTOP.md - Guia de instalação
+  2. STATUS_DEPLOYMENT_ATUAL.txt - Status atual
+  3. RESOLVER_NPM_E_DEPLOY.md - Guia de deployment
+  4. DEPLOYMENT_INSTRUCTIONS.md - Instruções completas
+
+Se tiver problemas:
+  1. Consulte INSTALACAO_DOCKER_DESKTOP.md
+  2. Verifique requisitos do sistema
+  3. Tente reinstalar Docker Desktop
+  4. Reinicie o computador
+
+═══════════════════════════════════════════════════════════════════════════════
+                        ✨ O QUE VOCÊ VAI TER
+═══════════════════════════════════════════════════════════════════════════════
+
+Após completar o deployment:
+
+✅ Backend FastAPI rodando (porta 8000)
+   - 25+ endpoints REST
+   - Autenticação
+   - Permissões
+   - Funções
+   - Filtros avançados
+   - Exportação PDF/Excel
+   - Auditoria
+   - Importação CSV
+   - Notificações
+
+✅ Frontend React rodando (porta 3000)
+   - Dashboard
+   - Permissões (nova página)
+   - Estatísticas (nova página)
+   - Consultas (nova página)
+   - Eleitores
+   - Ativistas
+   - Usuários
+
+✅ Banco de Dados PostgreSQL (porta 5432)
+   - 10 tabelas novas
+   - 11 índices
+   - 4 permissões padrão
+
+✅ Banco de Dados MongoDB (porta 27017)
+   - Pronto para NestJS
+
+✅ Nginx Reverse Proxy (porta 80/443)
+   - Roteamento de requisições
+
+═══════════════════════════════════════════════════════════════════════════════
+                        🎉 VAMOS LÁ!
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Instale Docker Desktop
+2. Abra novo PowerShell
+3. Execute os comandos de deployment
+4. Acesse http://localhost:3000
+
+Tempo Total: ~1 hora
+
+Você está a apenas 1 hora de ter CAPTAR v2.0 rodando com todas as 15 melhorias!
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Data: 16/11/2025 23:45
+Status: ⏳ AGUARDANDO DOCKER DESKTOP
+Próxima Ação: Instalar Docker Desktop

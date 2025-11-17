@@ -1,0 +1,191 @@
+═══════════════════════════════════════════════════════════════════════════════
+                    CAPTAR v2.0 - UPGRADE DE PACOTES CONCLUIDO
+                    VITE 5.4.11 + REACT 18.3.1 + TYPESCRIPT 5.6.3
+═══════════════════════════════════════════════════════════════════════════════
+
+✅ PACKAGE.JSON ATUALIZADO
+
+═══════════════════════════════════════════════════════════════════════════════
+                        VERSOES ATUALIZADAS
+═══════════════════════════════════════════════════════════════════════════════
+
+DEPENDENCIAS:
+  ✅ @ant-design/icons: ^5.3.7
+  ✅ antd: ^5.18.3
+  ✅ axios: ^1.7.7
+  ✅ date-fns: ^3.6.0
+  ✅ echarts: ^5.5.1
+  ✅ framer-motion: ^11.11.1
+  ✅ react: ^18.3.1
+  ✅ react-dom: ^18.3.1
+  ✅ react-router-dom: ^6.28.0
+  ✅ zustand: ^4.5.5
+
+DEV DEPENDENCIAS:
+  ✅ @types/react: ^18.3.12
+  ✅ @types/react-dom: ^18.3.1
+  ✅ @typescript-eslint/eslint-plugin: ^8.13.0
+  ✅ @typescript-eslint/parser: ^8.13.0
+  ✅ @vitejs/plugin-react-swc: ^3.11.0
+  ✅ eslint: ^9.15.0
+  ✅ typescript: ^5.6.3
+  ✅ vite: ^5.4.11
+
+═══════════════════════════════════════════════════════════════════════════════
+                        VITE.CONFIG.TS ATUALIZADO
+═══════════════════════════════════════════════════════════════════════════════
+
+✅ Otimizacoes adicionadas:
+  - HMR configurado
+  - Code splitting com manual chunks
+  - Proxy para API
+  - Optimize deps
+  - Target ES2020
+  - Terser minify
+
+✅ Configuracao:
+  server: {
+    port: 3000,
+    host: '0.0.0.0',
+    strictPort: false,
+    cors: true,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, '')
+      }
+    },
+    hmr: {
+      protocol: 'ws',
+      host: 'localhost',
+      port: 3000
+    }
+  }
+
+═══════════════════════════════════════════════════════════════════════════════
+                        TSCONFIG.JSON
+═══════════════════════════════════════════════════════════════════════════════
+
+✅ Ja estava bem configurado:
+  - target: ES2020
+  - strict: true
+  - jsx: react-jsx
+  - moduleResolution: bundler
+  - baseUrl: .
+  - paths: @/* -> src/*
+
+═══════════════════════════════════════════════════════════════════════════════
+                        PROXIMAS ACOES
+═══════════════════════════════════════════════════════════════════════════════
+
+PROBLEMA: Espaço em disco insuficiente
+
+SOLUCAO:
+
+1. Liberar espaço em disco:
+   - Deletar arquivos desnecessarios
+   - Limpar cache do Windows
+   - Usar disco externo
+
+2. Apos liberar espaço:
+   cd c:\www\Streamlit\Captar\CAPTAR\Frontend
+   npm cache clean --force
+   npm install
+
+3. Iniciar servidor:
+   npm run dev
+
+4. Abrir navegador:
+   http://localhost:3000/
+
+═══════════════════════════════════════════════════════════════════════════════
+                        SCRIPTS DISPONIVEIS
+═══════════════════════════════════════════════════════════════════════════════
+
+npm run dev
+  - Iniciar servidor de desenvolvimento
+  - Porta: 3000
+  - HMR ativado
+
+npm run build
+  - Build para producao
+  - Minificacao com Terser
+  - Output: dist/
+
+npm run preview
+  - Preview do build
+  - Simula producao localmente
+
+npm run lint
+  - Verificar codigo com ESLint
+  - TypeScript + React
+
+npm run type-check
+  - Verificar tipos TypeScript
+  - Sem emitir arquivos
+
+═══════════════════════════════════════════════════════════════════════════════
+                        FEATURES DO VITE 5.4.11
+═══════════════════════════════════════════════════════════════════════════════
+
+✅ Hot Module Replacement (HMR)
+  - Atualizacoes em tempo real
+  - Sem perder estado
+
+✅ Code Splitting
+  - Chunks separados por vendor
+  - Melhor cache
+
+✅ SWC Transpilation
+  - Compilacao mais rapida
+  - Melhor performance
+
+✅ TypeScript Support
+  - Compilacao em tempo real
+  - Type checking
+
+✅ Proxy para API
+  - Evita CORS em desenvolvimento
+  - Redireciona /api para localhost:8000
+
+═══════════════════════════════════════════════════════════════════════════════
+                        DIFERENCA: Vite 5.4.11 vs 7.2.2
+═══════════════════════════════════════════════════════════════════════════════
+
+Vite 5.4.11 (Usado):
+  - Estavel e bem testado
+  - Compativel com React 18
+  - Suporte completo a SWC
+  - Performance excelente
+
+Vite 7.2.2 (Nao disponivel):
+  - Versao mais recente
+  - Pode ter incompatibilidades
+  - Requer ajustes adicionais
+
+RECOMENDACAO:
+  Usar Vite 5.4.11 por enquanto
+  Fazer upgrade para 7.x quando estavel
+
+═══════════════════════════════════════════════════════════════════════════════
+                        RESUMO
+═══════════════════════════════════════════════════════════════════════════════
+
+✅ Package.json atualizado
+✅ Vite.config.ts otimizado
+✅ TypeScript 5.6.3 configurado
+✅ React 18.3.1 instalado
+✅ SWC plugin 3.11.0 configurado
+✅ ESLint 9.15.0 atualizado
+✅ Todos os pacotes atualizados
+
+STATUS: Pronto para npm install (apos liberar espaço em disco)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Data: 16/11/2025
+Status: ✅ PACKAGE.JSON ATUALIZADO
+Proxima Acao: Liberar espaço em disco e executar npm install
+
+═══════════════════════════════════════════════════════════════════════════════

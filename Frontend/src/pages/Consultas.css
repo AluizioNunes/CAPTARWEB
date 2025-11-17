@@ -1,0 +1,33 @@
+.consultas-container {
+  padding: 20px;
+  background-color: #f5f5f5;
+  min-height: 100vh;
+}
+
+.consultas-card {
+  background-color: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.consultas-form {
+  margin-bottom: 20px;
+}
+
+.consultas-table {
+  background-color: white;
+  border-radius: 4px;
+}
+
+.consultas-table .ant-table {
+  font-size: 14px;
+}
+
+.consultas-table .ant-table-thead > tr > th {
+  background-color: #fafafa;
+  font-weight: 600;
+}
+
+.consultas-table .ant-table-tbody > tr:hover > td {
+  background-color: #f5f5f5;
+}

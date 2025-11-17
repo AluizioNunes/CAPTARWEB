@@ -1,0 +1,247 @@
+═══════════════════════════════════════════════════════════════════════════════
+              CONFIGURAR DOCKER REMOTO - UBUNTU LINUX 172.26.97.64
+═══════════════════════════════════════════════════════════════════════════════
+
+SERVIDOR: 172.26.97.64 (Ubuntu Linux)
+USUARIO: root
+SENHA: 123
+PORTA DOCKER: 2375
+
+═══════════════════════════════════════════════════════════════════════════════
+                        PASSO 1: CONECTAR VIA SSH
+═══════════════════════════════════════════════════════════════════════════════
+
+Abra PowerShell e execute:
+
+ssh root@172.26.97.64
+
+Quando pedir senha, digite: 123
+
+Resultado esperado:
+root@ubuntu:~#
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PASSO 2: FAZER BACKUP DO ARQUIVO ORIGINAL
+═══════════════════════════════════════════════════════════════════════════════
+
+No terminal SSH, execute:
+
+cp /etc/docker/daemon.json /etc/docker/daemon.json.backup
+
+Resultado esperado:
+root@ubuntu:~#
+
+═══════════════════════════════════════════════════════════════════════════════
+                  PASSO 3: EDITAR ARQUIVO daemon.json
+═══════════════════════════════════════════════════════════════════════════════
+
+Opcao 1: Usar nano (mais facil)
+
+nano /etc/docker/daemon.json
+
+Opcao 2: Usar vi
+
+vi /etc/docker/daemon.json
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PASSO 4: ADICIONAR CONFIGURACAO TCP
+═══════════════════════════════════════════════════════════════════════════════
+
+Se o arquivo estiver vazio, adicione:
+
+{
+  "hosts": [
+    "unix:///var/run/docker.sock",
+    "tcp://0.0.0.0:2375"
+  ],
+  "debug": true,
+  "log-driver": "json-file"
+}
+
+Se o arquivo ja tiver conteudo, localize a linha "hosts" e adicione:
+
+"tcp://0.0.0.0:2375"
+
+Exemplo completo:
+
+{
+  "hosts": [
+    "unix:///var/run/docker.sock",
+    "tcp://0.0.0.0:2375"
+  ],
+  "debug": true,
+  "log-driver": "json-file",
+  "storage-driver": "overlay2"
+}
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PASSO 5: SALVAR E SAIR (NANO)
+═══════════════════════════════════════════════════════════════════════════════
+
+Se estiver usando nano:
+
+1. Pressione: Ctrl+O
+2. Pressione: Enter
+3. Pressione: Ctrl+X
+
+Resultado esperado:
+root@ubuntu:~#
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PASSO 6: SALVAR E SAIR (VI)
+═══════════════════════════════════════════════════════════════════════════════
+
+Se estiver usando vi:
+
+1. Pressione: Esc
+2. Digite: :wq
+3. Pressione: Enter
+
+Resultado esperado:
+root@ubuntu:~#
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PASSO 7: RECARREGAR DAEMON DO DOCKER
+═══════════════════════════════════════════════════════════════════════════════
+
+Execute:
+
+systemctl daemon-reload
+
+Resultado esperado:
+root@ubuntu:~#
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PASSO 8: REINICIAR DOCKER
+═══════════════════════════════════════════════════════════════════════════════
+
+Execute:
+
+systemctl restart docker
+
+Aguarde alguns segundos...
+
+Resultado esperado:
+root@ubuntu:~#
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PASSO 9: VERIFICAR SE DOCKER ESTA RODANDO
+═══════════════════════════════════════════════════════════════════════════════
+
+Execute:
+
+systemctl status docker
+
+Resultado esperado:
+active (running)
+
+═══════════════════════════════════════════════════════════════════════════════
+                  PASSO 10: VERIFICAR PORTA 2375 ABERTA
+═══════════════════════════════════════════════════════════════════════════════
+
+Execute:
+
+netstat -tlnp | grep 2375
+
+Resultado esperado:
+tcp  0  0  0.0.0.0:2375  0.0.0.0:*  LISTEN  xxxx/dockerd
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PASSO 11: TESTAR CONEXAO LOCAL
+═══════════════════════════════════════════════════════════════════════════════
+
+Execute:
+
+curl http://localhost:2375/version
+
+Resultado esperado:
+{"Version":"20.10.x", ...}
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PASSO 12: SAIR DO SSH
+═══════════════════════════════════════════════════════════════════════════════
+
+Execute:
+
+exit
+
+Resultado esperado:
+Voltou ao PowerShell local
+
+═══════════════════════════════════════════════════════════════════════════════
+                  PASSO 13: TESTAR CONEXAO REMOTA (NO CLIENTE)
+═══════════════════════════════════════════════════════════════════════════════
+
+No PowerShell local, execute:
+
+$env:DOCKER_HOST = "tcp://172.26.97.64:2375"
+docker version
+
+Resultado esperado:
+Client: Docker Engine - Community
+Server: Docker Engine - Community
+
+═══════════════════════════════════════════════════════════════════════════════
+                    PASSO 14: FAZER DEPLOY (NO CLIENTE)
+═══════════════════════════════════════════════════════════════════════════════
+
+Se a conexao funcionou, execute:
+
+cd c:\www\Streamlit\Captar
+.\start_captar.ps1
+
+Resultado esperado:
+- Containers sendo iniciados
+- Migrations sendo executadas
+- FastAPI iniciando
+- Frontend respondendo
+
+═══════════════════════════════════════════════════════════════════════════════
+                        TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════════════════════
+
+Erro: "Connection refused"
+  - Verifique se Docker esta rodando: systemctl status docker
+  - Verifique se porta 2375 esta aberta: netstat -tlnp | grep 2375
+  - Verifique firewall: ufw status
+
+Erro: "Permission denied"
+  - Verifique se usuario e senha estao corretos
+  - Tente com sudo: sudo systemctl restart docker
+
+Erro: "Docker nao respondendo"
+  - Reinicie Docker: systemctl restart docker
+  - Verifique logs: journalctl -u docker -n 50
+
+═══════════════════════════════════════════════════════════════════════════════
+                        RESUMO DOS COMANDOS
+═══════════════════════════════════════════════════════════════════════════════
+
+# SSH
+ssh root@172.26.97.64
+
+# Backup
+cp /etc/docker/daemon.json /etc/docker/daemon.json.backup
+
+# Editar
+nano /etc/docker/daemon.json
+
+# Recarregar
+systemctl daemon-reload
+
+# Reiniciar
+systemctl restart docker
+
+# Verificar
+systemctl status docker
+netstat -tlnp | grep 2375
+curl http://localhost:2375/version
+
+# Sair
+exit
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Data: 16/11/2025
+Status: Pronto para configuracao manual
+Proxima Acao: Seguir passos acima

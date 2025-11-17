@@ -1,0 +1,163 @@
+
+services:
+  # Todos os containers estão na stack captar
+  # PostgreSQL Database (Stack: captar)
+  postgres:
+    image: postgres:18-alpine
+    container_name: captar-postgres
+    labels:
+      - "com.captar.stack=captar"
+    environment:
+      POSTGRES_USER: ${DB_USER:-captar}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-captar}
+      POSTGRES_DB: ${DB_NAME:-captar}
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - captar-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U captar"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB (Stack: captar)
+  mongodb:
+    image: mongo:latest
+    container_name: captar-mongodb
+    labels:
+      - "com.captar.stack=captar"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-captar}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-captar}
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-captar}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - captar-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Database Migrations (Stack: captar)
+  # migrations:
+  #   image: postgres:15-alpine
+  #   container_name: captar-migrations
+  #   labels:
+  #     - "com.captar.stack=captar"
+  #   environment:
+  #     PGPASSWORD: ${DB_PASSWORD:-captar}
+  #   volumes:
+  #     - ./Backend/FastAPI/migrations.sql:/migrations.sql:ro
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   networks:
+  #     - captar-network
+  #   command: >
+  #     sh -c "psql -h postgres -U ${DB_USER:-captar} -d ${DB_NAME:-captar} -f /migrations.sql && echo 'Migrations completed'"
+  #   restart: on-failure
+
+  # FastAPI Backend (Stack: captar)
+  fastapi:
+    build:
+      context: ./Backend/FastAPI
+      dockerfile: Dockerfile
+    image: captar-fastapi:latest
+    container_name: captar-fastapi
+    labels:
+      - "com.captar.stack=captar"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-captar}
+      DB_USER: ${DB_USER:-captar}
+      DB_PASSWORD: ${DB_PASSWORD:-captar}
+      DB_SCHEMA: captar
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # migrations:
+      #   condition: service_completed_successfully
+    networks:
+      - captar-network
+    restart: unless-stopped
+
+  # NestJS Backend (Stack: captar)
+  nestjs:
+    build:
+      context: ./Backend/NestJS
+      dockerfile: Dockerfile
+    image: captar-nestjs:latest
+    container_name: captar-nestjs
+    labels:
+      - "com.captar.stack=captar"
+    environment:
+      MONGODB_URI: mongodb://${MONGO_USER:-captar}:${MONGO_PASSWORD:-captar}@mongodb:27017/${MONGO_DB:-captar}?authSource=admin
+      NODE_ENV: production
+    ports:
+      - "3001:3001"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - captar-network
+    restart: unless-stopped
+
+  # React Frontend (Stack: captar)
+  frontend:
+    build:
+      context: ./Frontend
+      dockerfile: Dockerfile
+    image: captar-frontend:latest
+    container_name: captar-frontend
+    labels:
+      - "com.captar.stack=captar"
+    ports:
+      - "3000:3000"
+    environment:
+      REACT_APP_API_URL: http://localhost:8000/api
+    depends_on:
+      - fastapi
+      - nestjs
+    networks:
+      - captar-network
+    restart: unless-stopped
+
+  # Nginx Reverse Proxy (Stack: captar)
+  nginx:
+    image: nginx:alpine
+    container_name: captar-nginx
+    labels:
+      - "com.captar.stack=captar"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - frontend
+      - fastapi
+      - nestjs
+    networks:
+      - captar-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  mongodb_data:
+    driver: local
+
+networks:
+  captar-network:
+    driver: bridge

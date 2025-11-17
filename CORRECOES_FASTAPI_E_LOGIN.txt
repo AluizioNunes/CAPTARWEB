@@ -1,0 +1,170 @@
+═══════════════════════════════════════════════════════════════════════════════
+                    CORRECOES - FASTAPI PORTA 5000 E LOGIN
+═══════════════════════════════════════════════════════════════════════════════
+
+✅ CORRECOES REALIZADAS
+
+═══════════════════════════════════════════════════════════════════════════════
+                        1. PORTA DA API ALTERADA
+═══════════════════════════════════════════════════════════════════════════════
+
+DE: http://localhost:8000 (Django)
+PARA: http://localhost:5000 (FastAPI)
+
+Arquivos alterados:
+  ✅ .env
+     VITE_API_URL=http://localhost:5000/api
+
+  ✅ vite.config.ts
+     proxy: {
+       '/api': {
+         target: 'http://localhost:5000',
+         ...
+       }
+     }
+
+  ✅ src/services/api.ts
+     const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
+
+  ✅ src/services/api_extended.ts
+     const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
+
+═══════════════════════════════════════════════════════════════════════════════
+                        2. BOTAO ACESSO DESENVOLVEDOR CORRIGIDO
+═══════════════════════════════════════════════════════════════════════════════
+
+PROBLEMA:
+  - Botao estava dentro de um Form
+  - Nao funcionava corretamente
+
+SOLUCAO:
+  - Remover Form wrapper
+  - Usar onClick direto no Button
+  - Simplificar logica
+
+ANTES:
+  <Form onFinish={() => { ... }}>
+    <Form.Item>
+      <Button>Acesso Direto</Button>
+    </Form.Item>
+  </Form>
+
+DEPOIS:
+  <Button
+    onClick={() => {
+      onFinish({ usuario: '', senha: '', acesso_direto: true })
+    }}
+  >
+    🔧 Acesso Direto (Desenvolvedor)
+  </Button>
+
+═══════════════════════════════════════════════════════════════════════════════
+                        3. COMO USAR AGORA
+═══════════════════════════════════════════════════════════════════════════════
+
+OPCAO 1: ACESSO DESENVOLVEDOR (Recomendado para testes)
+  1. Abra http://localhost:5175/
+  2. Clique em "🔧 Acesso Direto (Desenvolvedor)"
+  3. Sera logado automaticamente como ADMINISTRADOR
+  4. Sera redirecionado para o Dashboard
+  5. Navbar aparecera com suas informacoes
+
+OPCAO 2: LOGIN NORMAL (Requer FastAPI rodando)
+  1. Certifique-se que FastAPI esta rodando em http://localhost:5000
+  2. Abra http://localhost:5175/
+  3. Digite usuario e senha
+  4. Clique em "ENTRAR"
+  5. Se credenciais forem validas, sera logado
+
+═══════════════════════════════════════════════════════════════════════════════
+                        4. DADOS DE TESTE (ACESSO DESENVOLVEDOR)
+═══════════════════════════════════════════════════════════════════════════════
+
+ID: 9999
+Nome: USUARIO TEMPORARIO
+Funcao: ADMINISTRADOR
+Perfil: ADMINISTRADOR
+Email: admin@example.com
+CPF: 000.000.000-00
+Login Time: Data/Hora atual
+
+═══════════════════════════════════════════════════════════════════════════════
+                        5. VERIFICAR SE ESTA FUNCIONANDO
+═══════════════════════════════════════════════════════════════════════════════
+
+PASSO 1: Iniciar Frontend
+  cd c:\www\Streamlit\Captar\CAPTAR\Frontend
+  npm run dev
+
+PASSO 2: Abrir navegador
+  http://localhost:5175/
+
+PASSO 3: Clicar em "Acesso Direto"
+  - Deve aparecer mensagem "Acesso direto ativado!"
+  - Deve redirecionar para Dashboard
+  - Navbar deve aparecer no topo
+
+PASSO 4: Verificar Navbar
+  - Nome do usuario: USUARIO TEMPORARIO
+  - Funcao: ADMINISTRADOR
+  - Perfil: ADMINISTRADOR
+  - Hora de login: Data/Hora atual
+  - Botao Logout deve estar visivel
+
+PASSO 5: Testar Logout
+  - Clique em "Logout"
+  - Deve voltar para tela de login
+  - localStorage deve ser limpo
+
+═══════════════════════════════════════════════════════════════════════════════
+                        6. PROXIMAS ACOES
+═══════════════════════════════════════════════════════════════════════════════
+
+1. TESTAR FRONTEND
+   npm run dev
+   Abra http://localhost:5175/
+
+2. TESTAR ACESSO DESENVOLVEDOR
+   Clique em "🔧 Acesso Direto (Desenvolvedor)"
+   Verifique se consegue acessar
+
+3. TESTAR LOGOUT
+   Clique em "Logout"
+   Verifique se volta para login
+
+4. CONECTAR AO BACKEND (OPCIONAL)
+   Se quiser testar login real:
+   - Certifique-se que FastAPI esta rodando em http://localhost:5000
+   - Teste login com credenciais validas
+
+═══════════════════════════════════════════════════════════════════════════════
+                        7. TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════════════════════
+
+PROBLEMA: Botao "Acesso Direto" nao funciona
+SOLUCAO:
+  - Verifique se o navegador nao tem cache
+  - Limpe cache: Ctrl+Shift+Delete
+  - Recarregue a pagina: F5 ou Ctrl+R
+  - Reinicie o servidor: npm run dev
+
+PROBLEMA: Navbar nao aparece apos login
+SOLUCAO:
+  - Verifique se useAuthStore esta retornando isAuthenticated = true
+  - Verifique localStorage (F12 > Application > Local Storage)
+  - Verifique console para erros (F12 > Console)
+
+PROBLEMA: Logout nao funciona
+SOLUCAO:
+  - Verifique se localStorage esta sendo limpo
+  - Verifique se isAuthenticated esta sendo setado para false
+  - Recarregue a pagina manualmente
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Data: 16/11/2025 21:35
+Status: ✅ CORRECOES CONCLUIDAS
+Proxima Acao: Testar acesso desenvolvedor
+URL: http://localhost:5175/
+
+═══════════════════════════════════════════════════════════════════════════════

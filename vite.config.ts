@@ -31,7 +31,8 @@ export default defineConfig({
         manualChunks: {
           'react-vendor': ['react', 'react-dom', 'react-router-dom'],
           'ui-vendor': ['antd', '@ant-design/icons'],
-          'utils': ['axios', 'zustand', 'date-fns', 'framer-motion']
+          'utils': ['axios', 'zustand', 'date-fns', 'framer-motion'],
+          'charts-vendor': ['echarts']
         }
       }
     }

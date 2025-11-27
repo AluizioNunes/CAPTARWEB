@@ -1,4 +1,4 @@
-import { Modal, Form, Input, Checkbox, Button, Space, InputNumber, DatePicker, Select, Card, Avatar, Switch, App } from 'antd'
+import { Modal, Form, Input, Checkbox, Button, Space, InputNumber, DatePicker, Select, Card, Avatar, Switch, message } from 'antd'
 import { UserOutlined, IdcardOutlined, CrownOutlined, TagOutlined, PhoneOutlined, MailOutlined, UserSwitchOutlined, LockOutlined, SaveOutlined, CloseCircleOutlined } from '@ant-design/icons'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useApi } from '../context/ApiContext'
@@ -663,4 +663,4 @@ export default function UsuariosModal({ open, initial, onCancel, onSaved }: Prop
     </Modal>
   )
 }
-  const { message } = App.useApp()
+  

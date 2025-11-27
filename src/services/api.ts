@@ -588,6 +588,50 @@ class ApiService {
     const response = await this.api.delete(`/tenant-parametros/${tenantId}/${id}`)
     return response.data
   }
+
+  async provisionTenant(body: { nome: string; slug: string; db_name: string; db_host: string; db_port: string; db_user: string; db_password: string }): Promise<{ ok: boolean; idTenant: number; dsn: string; actions: string[] }> {
+    try {
+      const response = await this.api.post('/tenants/provision', body)
+      return response.data
+    } catch (e: any) {
+      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const response = await fb.post('/tenants/provision', body)
+      return response.data
+    }
+  }
+
+  async setTenantDsn(slug: string, dsn: string): Promise<{ ok: boolean; idTenant: number; actions: string[] }> {
+    try {
+      const response = await this.api.post(`/tenants/${slug}/set_dsn`, { dsn })
+      return response.data
+    } catch (e: any) {
+      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const response = await fb.post(`/tenants/${slug}/set_dsn`, { dsn })
+      return response.data
+    }
+  }
+
+  async migrateAllTenants(): Promise<{ ok: boolean; results: any[] }> {
+    try {
+      const response = await this.api.post('/admin/migrate_all_tenants')
+      return response.data
+    } catch (e: any) {
+      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const response = await fb.post('/admin/migrate_all_tenants')
+      return response.data
+    }
+  }
+
+  async migrateTenantData(slug: string): Promise<{ ok: boolean; migrated: number }> {
+    try {
+      const response = await this.api.post('/tenants/migrate_data', { slug })
+      return response.data
+    } catch (e: any) {
+      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const response = await fb.post('/tenants/migrate_data', { slug })
+      return response.data
+    }
+  }
   // ==================== INTEGRAÇÕES ====================
 
   async testarIntegracao(payload: { base_url: string; uf?: string; dataset?: string; municipio?: string }): Promise<{ connected: boolean; status_code: number }> {

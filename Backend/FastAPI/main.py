@@ -11,8 +11,13 @@ from pydantic import BaseModel
 from datetime import datetime
 import os
 from dotenv import load_dotenv
+import redis
 import psycopg
 from contextlib import contextmanager
+try:
+    from psycopg_pool import ConnectionPool
+except Exception:
+    ConnectionPool = None
 import json
 import csv
 import io
@@ -32,12 +37,23 @@ import pathlib
 load_dotenv()
 
 # Database Configuration
-DB_HOST = os.getenv('DB_HOST', 'postgres')
+def _resolve_host(h: str, fallback: str = 'localhost') -> str:
+    import socket
+    try:
+        socket.getaddrinfo(h, None)
+        return h
+    except Exception:
+        return fallback
+
+DB_HOST = _resolve_host(os.getenv('DB_HOST', 'postgres'), 'localhost')
 DB_PORT = os.getenv('DB_PORT', '5432')
 DB_NAME = os.getenv('DB_NAME', 'captar')
 DB_USER = os.getenv('DB_USER', 'captar')
 DB_PASSWORD = os.getenv('DB_PASSWORD', 'captar')
 DB_SCHEMA = os.getenv('DB_SCHEMA', 'captar')
+REDIS_HOST = _resolve_host(os.getenv('REDIS_HOST', 'redis'), 'localhost')
+REDIS_PORT = int(os.getenv('REDIS_PORT', '6379'))
+REDIS_DB = int(os.getenv('REDIS_DB', '0'))
 
 DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
@@ -58,22 +74,31 @@ app.add_middleware(
 )
 
 # Database Connection Helper
+_POOL_TTL_SECONDS = 600
+_POOLS: Dict[str, Tuple[any, float]] = {}
+
+def _get_pool(dsn: str) -> any:
+    now = time.time()
+    ent = _POOLS.get(dsn)
+    if ent and ent[1] > now:
+        return ent[0]
+    pool = ConnectionPool(dsn, max_size=10, timeout=30) if ConnectionPool else None
+    _POOLS[dsn] = (pool, now + _POOL_TTL_SECONDS)
+    return pool
+
 @contextmanager
 def get_db_connection(dsn: str | None = None):
-    if dsn and dsn.strip():
-        conn = psycopg.connect(dsn)
+    use_dsn = (dsn.strip() if (dsn and dsn.strip()) else f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+    pool = _get_pool(use_dsn)
+    if pool:
+        with pool.connection() as conn:
+            yield conn
     else:
-        conn = psycopg.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD
-        )
-    try:
-        yield conn
-    finally:
-        conn.close()
+        conn = psycopg.connect(use_dsn)
+        try:
+            yield conn
+        finally:
+            conn.close()
 
 _DSN_CACHE: Dict[str, Tuple[str, float]] = {}
 _DSN_TTL_SECONDS = 300
@@ -83,6 +108,21 @@ def _get_tenant_dsn(slug: str) -> Optional[str]:
     ent = _DSN_CACHE.get(slug)
     if ent and ent[1] > now:
         return ent[0]
+    rc = get_redis_client()
+    if rc:
+        try:
+            val = rc.get(f"tenant:{slug}:dsn")
+            if val:
+                try:
+                    from cryptography.fernet import Fernet
+                    key = os.getenv('DSN_SECRET_KEY', '')
+                    dsn = Fernet(key.encode()).decrypt(val.encode()).decode() if key else val
+                except Exception:
+                    dsn = val
+                _DSN_CACHE[slug] = (dsn, now + _DSN_TTL_SECONDS)
+                return dsn
+        except Exception:
+            pass
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
@@ -94,6 +134,14 @@ def _get_tenant_dsn(slug: str) -> Optional[str]:
             if row and row[0]:
                 dsn = str(row[0])
                 _DSN_CACHE[slug] = (dsn, now + _DSN_TTL_SECONDS)
+                if rc:
+                    try:
+                        from cryptography.fernet import Fernet
+                        key = os.getenv('DSN_SECRET_KEY', '')
+                        enc = Fernet(key.encode()).encrypt(dsn.encode()).decode() if key else dsn
+                        rc.setex(f"tenant:{slug}:dsn", _DSN_TTL_SECONDS, enc)
+                    except Exception:
+                        pass
                 return dsn
             # Alternativamente, montar DSN por componentes
             cur.execute(
@@ -113,6 +161,39 @@ def get_conn_for_request(request: Request):
     slug = request.headers.get('X-Tenant') or 'captar'
     dsn = _get_tenant_dsn(slug)
     return get_db_connection(dsn)
+
+_redis_client = None
+
+def get_redis_client():
+    global _redis_client
+    if _redis_client is None:
+        try:
+            _redis_client = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
+        except Exception:
+            _redis_client = None
+    return _redis_client
+
+def _tenant_slug(request: Request) -> str:
+    return (request.headers.get('X-Tenant') or 'captar').lower()
+
+def _redis_delete_pattern(rc, pattern: str):
+    try:
+        for k in rc.scan_iter(pattern):
+            rc.delete(k)
+    except Exception:
+        pass
+
+def invalidate_coordenadores(slug: str):
+    rc = get_redis_client()
+    if rc:
+        _redis_delete_pattern(rc, f"tenant:{slug}:usuarios:coordenadores")
+
+def invalidate_supervisores(slug: str, coordenador: str):
+    rc = get_redis_client()
+    if rc and coordenador:
+        name = coordenador.strip()
+        if name:
+            _redis_delete_pattern(rc, f"tenant:{slug}:usuarios:supervisores:{name}")
 
 def _ensure_tenant_slug(slug: str, nome: Optional[str] = None) -> int:
     with get_db_connection() as conn:
@@ -138,6 +219,36 @@ def _upsert_tenant_param(id_tenant: int, chave: str, valor: str):
             cur.execute(f'INSERT INTO "{DB_SCHEMA}"."TenantParametros" ("IdTenant","Chave","Valor","Tipo","Descricao") VALUES (%s,%s,%s,%s,%s)', (id_tenant, chave, valor, 'STRING', 'DSN do banco do tenant'))
         conn.commit()
 
+def _seed_pf_funcoes_for_tenant(id_tenant: int):
+    with get_db_connection() as conn:
+        conn.autocommit = True
+        cur = conn.cursor()
+        roles = ['ADMINISTRADOR', 'COORDENADOR', 'SUPERVISOR', 'ATIVISTA']
+        for r in roles:
+            cur.execute(
+                f"""
+                INSERT INTO "{DB_SCHEMA}"."Perfil" ("Perfil", "Descricao", "IdTenant")
+                SELECT %s, %s, %s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM "{DB_SCHEMA}"."Perfil" x
+                    WHERE UPPER(TRIM(x."Perfil")) = UPPER(TRIM(%s)) AND x."IdTenant" = %s
+                )
+                """,
+                (r, r, id_tenant, r, id_tenant)
+            )
+        for r in roles:
+            cur.execute(
+                f"""
+                INSERT INTO "{DB_SCHEMA}"."Funcoes" ("Funcao", "Descricao", "IdTenant")
+                SELECT %s, %s, %s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM "{DB_SCHEMA}"."Funcoes" x
+                    WHERE UPPER(TRIM(x."Funcao")) = UPPER(TRIM(%s)) AND x."IdTenant" = %s
+                )
+                """,
+                (r, r, id_tenant, r, id_tenant)
+            )
+
 class SetDsnRequest(BaseModel):
     dsn: str
 
@@ -145,8 +256,12 @@ class SetDsnRequest(BaseModel):
 async def tenants_set_dsn(slug: str, body: SetDsnRequest):
     try:
         tid = _ensure_tenant_slug(slug)
-        _upsert_tenant_param(tid, 'DB_DSN', body.dsn)
-        actions = apply_migrations_dsn(body.dsn)
+        central_dsn = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+        chosen = body.dsn if str(slug).lower() != 'captar' else central_dsn
+        _upsert_tenant_param(tid, 'DB_DSN', chosen)
+        actions = apply_migrations_dsn(chosen, slug)
+        _seed_pf_funcoes_for_tenant(tid)
+        actions.append('pf_funcoes seeded (central)')
         return {"ok": True, "idTenant": tid, "actions": actions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -163,6 +278,8 @@ class ProvisionTenantRequest(BaseModel):
 @app.post("/api/tenants/provision")
 async def tenants_provision(body: ProvisionTenantRequest):
     try:
+        if str(body.slug or '').lower() == 'captar':
+            raise HTTPException(status_code=400, detail='Tenant CAPTAR usa o banco padrão do sistema e não deve ser provisionado')
         tid = _ensure_tenant_slug(body.slug, body.nome)
         dsn = f"postgresql://{body.db_user}:{body.db_password}@{body.db_host}:{body.db_port}/{body.db_name}"
         try:
@@ -176,7 +293,9 @@ async def tenants_provision(body: ProvisionTenantRequest):
         except Exception:
             pass
         _upsert_tenant_param(tid, 'DB_DSN', dsn)
-        actions = apply_migrations_dsn(dsn)
+        actions = apply_migrations_dsn(dsn, body.slug)
+        _seed_pf_funcoes_for_tenant(tid)
+        actions.append('pf_funcoes seeded (central)')
         return {"ok": True, "idTenant": tid, "dsn": dsn, "actions": actions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -233,6 +352,28 @@ def apply_migrations():
         conn.autocommit = True
         cur = conn.cursor()
         try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Usuarios" (
+                    "IdUsuario" SERIAL PRIMARY KEY,
+                    "Nome" VARCHAR(255),
+                    "Email" VARCHAR(255),
+                    "Senha" VARCHAR(255),
+                    "Usuario" VARCHAR(120),
+                    "Perfil" VARCHAR(120),
+                    "Funcao" VARCHAR(120),
+                    "Ativo" BOOLEAN DEFAULT TRUE,
+                    "Celular" VARCHAR(15),
+                    "CPF" VARCHAR(14),
+                    "TenantLayer" VARCHAR(120),
+                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                )
+                """
+            )
+            actions.append('Usuarios created')
+        except Exception:
+            pass
+        try:
             import os
             base_dir = os.path.dirname(__file__)
             schema_path = os.path.join(base_dir, 'schema.sql')
@@ -243,8 +384,38 @@ def apply_migrations():
                     actions.append('schema.sql executed')
         except Exception:
             pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Perfil" (
+                    "IdPerfil" SERIAL PRIMARY KEY,
+                    "Perfil" VARCHAR(120),
+                    "Descricao" VARCHAR(255),
+                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                )
+                """
+            )
+            actions.append('Perfil created')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Funcoes" (
+                    "IdFuncao" SERIAL PRIMARY KEY,
+                    "Funcao" VARCHAR(120),
+                    "Descricao" VARCHAR(255),
+                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                )
+                """
+            )
+            actions.append('Funcoes created')
+        except Exception:
+            pass
         targets = [
             ("Usuarios", "Celular"),
+            ("Perfil", "Perfil"),
+            ("Funcoes", "Funcao"),
         ]
         for table_name, column_name in targets:
             cur.execute(
@@ -336,6 +507,34 @@ def apply_migrations():
         try:
             cur.execute(
                 f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Perfil" (
+                    "IdPerfil" SERIAL PRIMARY KEY,
+                    "Perfil" VARCHAR(120),
+                    "Descricao" VARCHAR(255),
+                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                )
+                """
+            )
+            actions.append('Perfil created')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Funcoes" (
+                    "IdFuncao" SERIAL PRIMARY KEY,
+                    "Funcao" VARCHAR(120),
+                    "Descricao" VARCHAR(255),
+                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                )
+                """
+            )
+            actions.append('Funcoes created')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
                 CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."TenantParametros" (
                     "IdParametro" SERIAL PRIMARY KEY,
                     "IdTenant" INT NOT NULL REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant") ON DELETE CASCADE,
@@ -363,6 +562,57 @@ def apply_migrations():
                     ('CAPTAR', 'captar', 'ATIVO', 'PADRAO')
                 )
                 actions.append('Default tenant inserted')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Usuarios\" WHERE UPPER(TRIM(\"Usuario\")) = 'ADMIN'"
+            )
+            m = cur.fetchone()[0]
+            if m == 0:
+                cur.execute(
+                    f"INSERT INTO \"{DB_SCHEMA}\".\"Usuarios\" (\"Nome\", \"Email\", \"Senha\", \"Usuario\", \"Perfil\", \"Funcao\", \"Ativo\", \"IdTenant\") VALUES (%s,%s,%s,%s,%s,%s,%s,(SELECT \"IdTenant\" FROM \"{DB_SCHEMA}\".\"Tenant\" WHERE \"Slug\"='captar' LIMIT 1))",
+                    ('ADMINISTRADOR', 'admin@captar.local', 'admin123', 'ADMIN', 'ADMINISTRADOR', 'ADMINISTRADOR', True)
+                )
+                actions.append('Default admin user inserted')
+        except Exception:
+            pass
+        try:
+            roles = ['ADMINISTRADOR', 'COORDENADOR', 'SUPERVISOR', 'ATIVISTA']
+            for r in roles:
+                cur.execute(
+                    f"""
+                    INSERT INTO \"{DB_SCHEMA}\".\"Perfil\" (\"Perfil\", \"Descricao\", \"IdTenant\")
+                    SELECT %s, %s, t.\"IdTenant\"
+                    FROM \"{DB_SCHEMA}\".\"Tenant\" t
+                    WHERE t.\"Slug\" = %s
+                    AND NOT EXISTS (
+                        SELECT 1 FROM \"{DB_SCHEMA}\".\"Perfil\" x
+                        WHERE UPPER(TRIM(x.\"Perfil\")) = UPPER(TRIM(%s)) AND x.\"IdTenant\" = t.\"IdTenant\"
+                    )
+                    """,
+                    (r, r, 'captar', r)
+                )
+            actions.append('Perfil seeded')
+        except Exception:
+            pass
+        try:
+            roles = ['ADMINISTRADOR', 'COORDENADOR', 'SUPERVISOR', 'ATIVISTA']
+            for r in roles:
+                cur.execute(
+                    f"""
+                    INSERT INTO \"{DB_SCHEMA}\".\"Funcoes\" (\"Funcao\", \"Descricao\", \"IdTenant\")
+                    SELECT %s, %s, t.\"IdTenant\"
+                    FROM \"{DB_SCHEMA}\".\"Tenant\" t
+                    WHERE t.\"Slug\" = %s
+                    AND NOT EXISTS (
+                        SELECT 1 FROM \"{DB_SCHEMA}\".\"Funcoes\" x
+                        WHERE UPPER(TRIM(x.\"Funcao\")) = UPPER(TRIM(%s)) AND x.\"IdTenant\" = t.\"IdTenant\"
+                    )
+                    """,
+                    (r, r, 'captar', r)
+                )
+            actions.append('Funcoes seeded')
         except Exception:
             pass
         for t in legacy_tables:
@@ -423,13 +673,64 @@ def apply_migrations():
             pass
     return actions
 
-def apply_migrations_dsn(dsn: str):
+def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):
     actions = []
     with get_db_connection(dsn) as conn:
         conn.autocommit = True
         cur = conn.cursor()
         try:
             cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{DB_SCHEMA}"')
+        except Exception:
+            pass
+        # Garantir tabela Usuarios compatível no banco do tenant
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Usuarios" (
+                    "IdUsuario" SERIAL PRIMARY KEY,
+                    "Nome" VARCHAR(255),
+                    "Email" VARCHAR(255),
+                    "Senha" VARCHAR(255),
+                    "Usuario" VARCHAR(120),
+                    "Perfil" VARCHAR(120),
+                    "Funcao" VARCHAR(120),
+                    "Ativo" BOOLEAN DEFAULT TRUE,
+                    "Celular" VARCHAR(15),
+                    "CPF" VARCHAR(14),
+                    "TenantLayer" VARCHAR(120),
+                    "IdTenant" INT
+                )
+                """
+            )
+            actions.append('Usuarios ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Perfil" (
+                    "IdPerfil" SERIAL PRIMARY KEY,
+                    "Perfil" VARCHAR(120),
+                    "Descricao" VARCHAR(255),
+                    "IdTenant" INT
+                )
+                """
+            )
+            actions.append('Perfil ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Funcoes" (
+                    "IdFuncao" SERIAL PRIMARY KEY,
+                    "Funcao" VARCHAR(120),
+                    "Descricao" VARCHAR(255),
+                    "IdTenant" INT
+                )
+                """
+            )
+            actions.append('Funcoes ensured (tenant DB)')
         except Exception:
             pass
         try:
@@ -466,6 +767,60 @@ def apply_migrations_dsn(dsn: str):
                         actions.append(f'{table_name}.{column_name} -> VARCHAR(15)')
             except Exception:
                 pass
+        # Inserir usuário ADMIN padrão (tenant DB)
+        try:
+            slug_upper = (slug or 'tenant').upper()
+            cur.execute(
+                f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Usuarios\" WHERE UPPER(TRIM(\"Usuario\")) = %s",
+                (f"ADMIN.{slug_upper}",)
+            )
+            m = cur.fetchone()[0]
+            if m == 0:
+                admin_email = f"admin@{(slug or 'tenant').lower()}.local"
+                admin_user = f"ADMIN.{slug_upper}"
+                admin_pass = f"Admin123{(slug or 'tenant').lower()}"
+                cur.execute(
+                    f"INSERT INTO \"{DB_SCHEMA}\".\"Usuarios\" (\"Nome\", \"Email\", \"Senha\", \"Usuario\", \"Perfil\", \"Funcao\", \"Ativo\") VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                    ('ADMINISTRADOR', admin_email, admin_pass, admin_user, 'ADMINISTRADOR', 'ADMINISTRADOR', True)
+                )
+                actions.append('Default admin user inserted (tenant DB)')
+        except Exception:
+            pass
+        try:
+            tid = None
+            if slug:
+                try:
+                    tid = _ensure_tenant_slug(slug)
+                except Exception:
+                    tid = None
+            roles = ['ADMINISTRADOR', 'COORDENADOR', 'SUPERVISOR', 'ATIVISTA']
+            for r in roles:
+                cur.execute(
+                    f"""
+                    INSERT INTO \"{DB_SCHEMA}\".\"Perfil\" (\"Perfil\", \"Descricao\", \"IdTenant\")
+                    SELECT %s, %s, %s
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM \"{DB_SCHEMA}\".\"Perfil\" x
+                        WHERE UPPER(TRIM(x.\"Perfil\")) = UPPER(TRIM(%s)) AND (x.\"IdTenant\" = %s OR %s IS NULL)
+                    )
+                    """,
+                    (r, r, tid, r, tid, tid)
+                )
+            for r in roles:
+                cur.execute(
+                    f"""
+                    INSERT INTO \"{DB_SCHEMA}\".\"Funcoes\" (\"Funcao\", \"Descricao\", \"IdTenant\")
+                    SELECT %s, %s, %s
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM \"{DB_SCHEMA}\".\"Funcoes\" x
+                        WHERE UPPER(TRIM(x.\"Funcao\")) = UPPER(TRIM(%s)) AND (x.\"IdTenant\" = %s OR %s IS NULL)
+                    )
+                    """,
+                    (r, r, tid, r, tid, tid)
+                )
+            actions.append('pf_funcoes seeded (tenant DB)')
+        except Exception:
+            pass
     return actions
 
 @app.on_event("startup")
@@ -566,9 +921,124 @@ async def admin_migrate_all_tenants():
             rows = cur.fetchall()
         for slug, dsn in rows:
             if dsn:
-                actions = apply_migrations_dsn(str(dsn))
+                actions = apply_migrations_dsn(str(dsn), str(slug))
                 results.append({"slug": slug, "actions": actions})
         return {"ok": True, "results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/ensure_usuarios")
+async def admin_ensure_usuarios():
+    try:
+        with get_db_connection() as conn:
+            conn.autocommit = True
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Usuarios" (
+                        "IdUsuario" SERIAL PRIMARY KEY,
+                        "Nome" VARCHAR(255),
+                        "Email" VARCHAR(255),
+                        "Senha" VARCHAR(255),
+                        "Usuario" VARCHAR(120),
+                        "Perfil" VARCHAR(120),
+                        "Funcao" VARCHAR(120),
+                        "Ativo" BOOLEAN DEFAULT TRUE,
+                        "Celular" VARCHAR(15),
+                        "CPF" VARCHAR(14),
+                        "TenantLayer" VARCHAR(120),
+                        "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                    )
+                    """
+                )
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Usuarios\" WHERE UPPER(TRIM(\"Usuario\")) = 'ADMIN'"
+                )
+                m = cur.fetchone()[0]
+                if m == 0:
+                    cur.execute(
+                        f"INSERT INTO \"{DB_SCHEMA}\".\"Usuarios\" (\"Nome\", \"Email\", \"Senha\", \"Usuario\", \"Perfil\", \"Funcao\", \"Ativo\", \"IdTenant\") VALUES (%s,%s,%s,%s,%s,%s,%s,(SELECT \"IdTenant\" FROM \"{DB_SCHEMA}\".\"Tenant\" WHERE \"Slug\"='captar' LIMIT 1))",
+                        ('ADMINISTRADOR', 'admin@captar.local', 'admin123', 'ADMIN', 'ADMINISTRADOR', 'ADMINISTRADOR', True)
+                    )
+            except Exception:
+                pass
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/ensure_pf")
+async def admin_ensure_pf():
+    try:
+        with get_db_connection() as conn:
+            conn.autocommit = True
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Perfil" (
+                        "IdPerfil" SERIAL PRIMARY KEY,
+                        "Perfil" VARCHAR(120),
+                        "Descricao" VARCHAR(255),
+                        "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                    )
+                    """
+                )
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Funcoes" (
+                        "IdFuncao" SERIAL PRIMARY KEY,
+                        "Funcao" VARCHAR(120),
+                        "Descricao" VARCHAR(255),
+                        "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                    )
+                    """
+                )
+            except Exception:
+                pass
+            try:
+                roles = ['ADMINISTRADOR', 'COORDENADOR', 'SUPERVISOR', 'ATIVISTA']
+                for r in roles:
+                    cur.execute(
+                        f"""
+                        INSERT INTO "{DB_SCHEMA}"."Perfil" ("Perfil", "Descricao", "IdTenant")
+                        SELECT %s, %s, t."IdTenant"
+                        FROM "{DB_SCHEMA}"."Tenant" t
+                        WHERE t."Slug" = %s
+                        AND NOT EXISTS (
+                            SELECT 1 FROM "{DB_SCHEMA}"."Perfil" x
+                            WHERE UPPER(TRIM(x."Perfil")) = UPPER(TRIM(%s)) AND x."IdTenant" = t."IdTenant"
+                        )
+                        """,
+                        (r, r, 'captar', r)
+                    )
+            except Exception:
+                pass
+            try:
+                roles = ['ADMINISTRADOR', 'COORDENADOR', 'SUPERVISOR', 'ATIVISTA']
+                for r in roles:
+                    cur.execute(
+                        f"""
+                        INSERT INTO "{DB_SCHEMA}"."Funcoes" ("Funcao", "Descricao", "IdTenant")
+                        SELECT %s, %s, t."IdTenant"
+                        FROM "{DB_SCHEMA}"."Tenant" t
+                        WHERE t."Slug" = %s
+                        AND NOT EXISTS (
+                            SELECT 1 FROM "{DB_SCHEMA}"."Funcoes" x
+                            WHERE UPPER(TRIM(x."Funcao")) = UPPER(TRIM(%s)) AND x."IdTenant" = t."IdTenant"
+                        )
+                        """,
+                        (r, r, 'captar', r)
+                    )
+            except Exception:
+                pass
+        return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -669,15 +1139,40 @@ class NotificacaoCreate(BaseModel):
 @app.post("/api/auth/login")
 async def login(request: LoginRequest, req: Request):
     try:
+        slug = (req.headers.get('X-Tenant') or 'captar').lower()
+        dsn = _get_tenant_dsn(slug)
         with get_conn_for_request(req) as conn:
             cursor = conn.cursor()
             tid = _tenant_id_from_header(req)
-            cursor.execute(
-                f"SELECT \"IdUsuario\", \"Nome\", \"Email\", \"Perfil\", \"Senha\", \"Usuario\" FROM \"{DB_SCHEMA}\".\"Usuarios\" WHERE UPPER(TRIM(\"Usuario\")) = %s AND \"IdTenant\" = %s LIMIT 1",
-                (request.usuario.upper(), tid)
-            )
+            try:
+                if dsn:
+                    cursor.execute(
+                        f"SELECT \"IdUsuario\", \"Nome\", \"Email\", \"Perfil\", \"Senha\", \"Usuario\" FROM \"{DB_SCHEMA}\".\"Usuarios\" WHERE UPPER(TRIM(\"Usuario\")) = %s LIMIT 1",
+                        (request.usuario.upper(),)
+                    )
+                else:
+                    cursor.execute(
+                        f"SELECT \"IdUsuario\", \"Nome\", \"Email\", \"Perfil\", \"Senha\", \"Usuario\" FROM \"{DB_SCHEMA}\".\"Usuarios\" WHERE UPPER(TRIM(\"Usuario\")) = %s AND \"IdTenant\" = %s LIMIT 1",
+                        (request.usuario.upper(), tid)
+                    )
+            except Exception as e:
+                msg = str(e)
+                if 'relation' in msg and 'Usuarios' in msg and dsn:
+                    try:
+                        apply_migrations_dsn(dsn, slug)
+                        if dsn:
+                            cursor.execute(
+                                f"SELECT \"IdUsuario\", \"Nome\", \"Email\", \"Perfil\", \"Senha\", \"Usuario\" FROM \"{DB_SCHEMA}\".\"Usuarios\" WHERE UPPER(TRIM(\"Usuario\")) = %s LIMIT 1",
+                                (request.usuario.upper(),)
+                            )
+                    except Exception:
+                        pass
+                else:
+                    raise
             row = cursor.fetchone()
             if not row:
+                if not dsn and slug != 'captar':
+                    raise HTTPException(status_code=400, detail="DSN não configurado para o tenant")
                 raise HTTPException(status_code=401, detail="Credenciais inválidas")
             user_id, nome, email, perfil_text, senha_hash, usuario_db = row
             senha_hash_str = str(senha_hash or "")
@@ -698,7 +1193,8 @@ async def login(request: LoginRequest, req: Request):
                 "usuario": usuario_login,
                 "email": email,
                 "cpf": "",
-                "token": f"token_{user_id}_{datetime.now().timestamp()}"
+                "tenant": slug,
+                "token": f"token_{slug}_{user_id}_{datetime.now().timestamp()}"
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -756,6 +1252,7 @@ async def usuarios_list(limit: int = 200, request: Request = None):
 @app.post("/api/usuarios")
 async def usuarios_create(payload: dict, request: Request):
     try:
+        rate_limit(request, "usuarios_create", 120)
         cols_meta = get_table_columns("Usuarios")
         allowed = {c["name"] for c in cols_meta if c["name"] != "IdUsuario"}
         data = {k: v for k, v in payload.items() if k in allowed}
@@ -777,6 +1274,10 @@ async def usuarios_create(payload: dict, request: Request):
             if tn:
                 data["TenantLayer"] = tn
         funcao_val = str(data.get("Funcao", "")).strip().upper()
+        usuario_val = str(data.get("Usuario", "")).strip().upper()
+        slug_hdr = _tenant_slug(request)
+        if usuario_val == "ADMIN" and slug_hdr.lower() != "captar":
+            raise HTTPException(status_code=400, detail="Usuario 'ADMIN' é exclusivo do tenant CAPTAR")
         nome_val = str(data.get("Nome", "")).strip()
         if funcao_val in ("ADMINISTRADOR", "COORDENADOR"):
             if "Coordenador" in colnames:
@@ -814,6 +1315,13 @@ async def usuarios_create(payload: dict, request: Request):
             )
             new_id = cursor.fetchone()[0]
             conn.commit()
+            try:
+                slug = _tenant_slug(request)
+                invalidate_coordenadores(slug)
+                coord = str(data.get("Coordenador") or "")
+                invalidate_supervisores(slug, coord)
+            except Exception:
+                pass
             return {"id": new_id}
     except HTTPException:
         raise
@@ -849,6 +1357,11 @@ async def usuarios_update(id: int, payload: dict, request: Request):
         data = _apply_update_defaults(cols_meta, data)
         data = _apply_update_user(cols_meta, data, _extract_user_from_auth(request))
         colnames = {c["name"] for c in cols_meta}
+        if "Usuario" in data:
+            usuario_val = str(data.get("Usuario", "")).strip().upper()
+            slug_hdr = _tenant_slug(request)
+            if usuario_val == "ADMIN" and slug_hdr.lower() != "captar":
+                raise HTTPException(status_code=400, detail="Usuario 'ADMIN' é exclusivo do tenant CAPTAR")
         if "TenantLayer" in colnames and "TenantLayer" not in data:
             data["TenantLayer"] = _tenant_name_from_header(request)
         if "TenantLayer" in data:
@@ -908,6 +1421,13 @@ async def usuarios_update(id: int, payload: dict, request: Request):
                 tuple(values + [id, _tenant_id_from_header(request)])
             )
             conn.commit()
+            try:
+                slug = _tenant_slug(request)
+                invalidate_coordenadores(slug)
+                coord = str((data.get("Coordenador") or payload.get("Coordenador") or ""))
+                invalidate_supervisores(slug, coord)
+            except Exception:
+                pass
             return {"id": id}
     except HTTPException:
         raise
@@ -921,6 +1441,13 @@ async def usuarios_delete(id: int, request: Request):
             cursor = conn.cursor()
             cursor.execute(f"DELETE FROM \"{DB_SCHEMA}\".\"Usuarios\" WHERE \"IdUsuario\" = %s", (id,))
             conn.commit()
+            try:
+                slug = _tenant_slug(request)
+                invalidate_coordenadores(slug)
+                # delete supervisors caches broadly for safety
+                _redis_delete_pattern(get_redis_client(), f"tenant:{slug}:usuarios:supervisores:*")
+            except Exception:
+                pass
             return {"deleted": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1026,6 +1553,14 @@ async def delete_permissao(perfil: str):
 # ==================== PERFIL (TABELA perfil) ====================
 
 def get_table_columns(table: str):
+    rc = get_redis_client()
+    if rc:
+        try:
+            raw = rc.get(f"schema:columns:{table}")
+            if raw:
+                return json.loads(raw)
+        except Exception:
+            pass
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -1038,7 +1573,13 @@ def get_table_columns(table: str):
             (DB_SCHEMA, table)
         )
         rows = cursor.fetchall()
-        return [{"name": r[0], "type": r[1], "nullable": (r[2] == 'YES'), "maxLength": r[3]} for r in rows]
+        out = [{"name": r[0], "type": r[1], "nullable": (r[2] == 'YES'), "maxLength": r[3]} for r in rows]
+        if rc:
+            try:
+                rc.setex(f"schema:columns:{table}", 600, json.dumps(out))
+            except Exception:
+                pass
+        return out
 
 @app.get("/api/perfil/schema")
 async def perfil_schema():
@@ -1051,9 +1592,18 @@ async def perfil_schema():
 @app.get("/api/perfil")
 async def perfil_list(limit: int = 200, request: Request = None):
     try:
+        rc = get_redis_client()
+        slug = request.headers.get('X-Tenant') if request else 'captar'
+        if rc and request:
+            try:
+                raw = rc.get(f"tenant:{str(slug).lower()}:perfil:list:{limit}")
+                if raw:
+                    data = json.loads(raw)
+                    return {"rows": data["rows"], "columns": data["columns"]}
+            except Exception:
+                pass
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            slug = request.headers.get('X-Tenant') if request else 'captar'
             if str(slug or '').lower() == 'captar':
                 cursor.execute(f"SELECT * FROM \"{DB_SCHEMA}\".\"Perfil\" ORDER BY 1 DESC LIMIT %s", (limit,))
             else:
@@ -1061,7 +1611,13 @@ async def perfil_list(limit: int = 200, request: Request = None):
             colnames = [desc[0] for desc in cursor.description]
             rows = cursor.fetchall()
             data = [dict(zip(colnames, row)) for row in rows]
-            return {"rows": data, "columns": colnames}
+            out = {"rows": data, "columns": colnames}
+            if rc and request:
+                try:
+                    rc.setex(f"tenant:{str(slug).lower()}:perfil:list:{limit}", 60, json.dumps(out))
+                except Exception:
+                    pass
+            return out
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1087,6 +1643,12 @@ async def perfil_create(payload: dict, request: Request):
             )
             new_id = cursor.fetchone()[0]
             conn.commit()
+            rc = get_redis_client()
+            if rc:
+                try:
+                    _redis_delete_pattern(rc, f"tenant:{_tenant_slug(request)}:perfil:list:*")
+                except Exception:
+                    pass
             return {"id": new_id}
     except HTTPException:
         raise
@@ -1113,6 +1675,12 @@ async def perfil_update(id: int, payload: dict, request: Request):
                 tuple(values + [id, _tenant_id_from_header(request)])
             )
             conn.commit()
+            rc = get_redis_client()
+            if rc:
+                try:
+                    _redis_delete_pattern(rc, f"tenant:{_tenant_slug(request)}:perfil:list:*")
+                except Exception:
+                    pass
             return {"id": id}
     except HTTPException:
         raise
@@ -1126,6 +1694,13 @@ async def perfil_delete(id: int):
             cursor = conn.cursor()
             cursor.execute(f"DELETE FROM \"{DB_SCHEMA}\".\"Perfil\" WHERE \"IdPerfil\" = %s", (id,))
             conn.commit()
+            # limpar cache para todos tenants (CAPTAR administrativo)
+            rc = get_redis_client()
+            if rc:
+                try:
+                    _redis_delete_pattern(rc, "tenant:*:perfil:list:*")
+                except Exception:
+                    pass
             return {"deleted": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1143,9 +1718,18 @@ async def funcoes_schema():
 @app.get("/api/funcoes")
 async def funcoes_list(limit: int = 200, request: Request = None):
     try:
+        rc = get_redis_client()
+        slug = request.headers.get('X-Tenant') if request else 'captar'
+        if rc and request:
+            try:
+                raw = rc.get(f"tenant:{str(slug).lower()}:funcoes:list:{limit}")
+                if raw:
+                    data = json.loads(raw)
+                    return {"rows": data["rows"], "columns": data["columns"]}
+            except Exception:
+                pass
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            slug = request.headers.get('X-Tenant') if request else 'captar'
             if str(slug or '').lower() == 'captar':
                 cursor.execute(f"SELECT * FROM \"{DB_SCHEMA}\".\"Funcoes\" ORDER BY \"IdFuncao\" DESC LIMIT %s", (limit,))
             else:
@@ -1153,7 +1737,13 @@ async def funcoes_list(limit: int = 200, request: Request = None):
             colnames = [desc[0] for desc in cursor.description]
             rows = cursor.fetchall()
             data = [dict(zip(colnames, row)) for row in rows]
-            return {"rows": data, "columns": colnames}
+            out = {"rows": data, "columns": colnames}
+            if rc and request:
+                try:
+                    rc.setex(f"tenant:{str(slug).lower()}:funcoes:list:{limit}", 60, json.dumps(out))
+                except Exception:
+                    pass
+            return out
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1179,6 +1769,12 @@ async def funcoes_create(payload: dict, request: Request):
             )
             new_id = cursor.fetchone()[0]
             conn.commit()
+            rc = get_redis_client()
+            if rc:
+                try:
+                    _redis_delete_pattern(rc, f"tenant:{_tenant_slug(request)}:funcoes:list:*")
+                except Exception:
+                    pass
             return {"id": new_id}
     except HTTPException:
         raise
@@ -1205,6 +1801,12 @@ async def funcoes_update(id: int, payload: dict, request: Request):
                 tuple(values + [id, _tenant_id_from_header(request)])
             )
             conn.commit()
+            rc = get_redis_client()
+            if rc:
+                try:
+                    _redis_delete_pattern(rc, f"tenant:{_tenant_slug(request)}:funcoes:list:*")
+                except Exception:
+                    pass
             return {"id": id}
     except HTTPException:
         raise
@@ -1218,6 +1820,12 @@ async def funcoes_delete(id: int):
             cursor = conn.cursor()
             cursor.execute(f"DELETE FROM \"{DB_SCHEMA}\".\"Funcoes\" WHERE \"IdFuncao\" = %s", (id,))
             conn.commit()
+            rc = get_redis_client()
+            if rc:
+                try:
+                    _redis_delete_pattern(rc, "tenant:*:funcoes:list:*")
+                except Exception:
+                    pass
             return {"deleted": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1421,9 +2029,17 @@ async def marcar_notificacao_lida(notif_id: int):
 @app.get("/api/dashboard/stats")
 async def dashboard_stats(request: Request = None):
     try:
+        rc = get_redis_client()
+        slug = request and request.headers.get('X-Tenant') or 'captar'
+        if rc and request:
+            try:
+                raw = rc.get(f"tenant:{str(slug).lower()}:dashboard:stats")
+                if raw:
+                    return json.loads(raw)
+            except Exception:
+                pass
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            slug = request.headers.get('X-Tenant') if request else 'captar'
             tid = _tenant_id_from_header(request) if request else 1
 
             if str(slug or '').lower() == 'captar':
@@ -1478,13 +2094,19 @@ async def dashboard_stats(request: Request = None):
             eleitores_por_zona = {row[0]: row[1] for row in zonas_rows}
             ativistas_por_funcao = {row[0]: row[1] for row in ativistas_por_funcao_rows}
 
-            return {
+            out = {
                 "total_eleitores": total_eleitores,
                 "total_ativistas": total_ativistas,
                 "total_usuarios": total_usuarios,
                 "eleitores_por_zona": eleitores_por_zona,
                 "ativistas_por_funcao": ativistas_por_funcao,
             }
+            if rc and request:
+                try:
+                    rc.setex(f"tenant:{str(slug).lower()}:dashboard:stats", 30, json.dumps(out))
+                except Exception:
+                    pass
+            return out
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1536,7 +2158,34 @@ async def tenants_create(payload: dict):
             )
             new_id = cursor.fetchone()[0]
             conn.commit()
-            return {"id": new_id}
+            # Auto construir DSN com base no novo tenant
+            slug = str(data.get("Slug") or "").lower()
+            nome = str(data.get("Nome") or slug.upper())
+            if slug == 'captar':
+                db_name = DB_NAME
+                dsn = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+            else:
+                db_name = f"captar_t{str(new_id).zfill(2)}_{slug}" if slug else f"captar_t{str(new_id).zfill(2)}"
+                dsn = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{db_name}"
+            # Criar banco físico e registrar DSN
+            try:
+                conn.autocommit = True
+                cursor.execute(f"SELECT 1 FROM pg_database WHERE datname = %s", (db_name,))
+                exists = cursor.fetchone() is not None
+                if slug != 'captar' and not exists:
+                    cursor.execute(f"CREATE DATABASE \"{db_name}\"")
+            except Exception:
+                pass
+            try:
+                _upsert_tenant_param(new_id, 'DB_DSN', dsn)
+            except Exception:
+                pass
+            # Aplicar migrações no DB do tenant e inserir ADMIN
+            try:
+                actions = apply_migrations_dsn(dsn, slug)
+            except Exception:
+                actions = []
+            return {"id": new_id, "dsn": dsn, "actions": actions}
     except HTTPException:
         raise
     except Exception as e:
@@ -1998,6 +2647,11 @@ async def health_db():
 def _tenant_id_from_header(request: Request):
     slug = request.headers.get('X-Tenant') or 'captar'
     try:
+        rc = get_redis_client()
+        if rc:
+            cached = rc.get(f"tenant:id:{slug}")
+            if cached:
+                return int(cached)
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -2006,7 +2660,13 @@ def _tenant_id_from_header(request: Request):
             )
             row = cur.fetchone()
             if row:
-                return int(row[0])
+                tid = int(row[0])
+                if rc:
+                    try:
+                        rc.setex(f"tenant:id:{slug}", 300, str(tid))
+                    except Exception:
+                        pass
+                return tid
     except Exception:
         pass
     return 1
@@ -2014,6 +2674,11 @@ def _tenant_id_from_header(request: Request):
 def _tenant_name_from_header(request: Request):
     slug = request.headers.get('X-Tenant') or 'captar'
     try:
+        rc = get_redis_client()
+        if rc:
+            cached = rc.get(f"tenant:name:{slug}")
+            if cached:
+                return str(cached)
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -2022,12 +2687,23 @@ def _tenant_name_from_header(request: Request):
             )
             row = cur.fetchone()
             if row and row[0]:
-                return str(row[0])
+                name = str(row[0])
+                if rc:
+                    try:
+                        rc.setex(f"tenant:name:{slug}", 300, name)
+                    except Exception:
+                        pass
+                return name
     except Exception:
         pass
     return 'CAPTAR'
 def _tenant_id_by_name(name: str):
     try:
+        rc = get_redis_client()
+        if rc:
+            cached = rc.get(f"tenant:idbyname:{name}")
+            if cached:
+                return int(cached)
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -2036,13 +2712,24 @@ def _tenant_id_by_name(name: str):
             )
             row = cur.fetchone()
             if row and row[0] is not None:
-                return int(row[0])
+                tid = int(row[0])
+                if rc:
+                    try:
+                        rc.setex(f"tenant:idbyname:{name}", 300, str(tid))
+                    except Exception:
+                        pass
+                return tid
     except Exception:
         pass
     return None
 
 def _tenant_name_by_id(tid: int) -> Optional[str]:
     try:
+        rc = get_redis_client()
+        if rc:
+            cached = rc.get(f"tenant:namebyid:{tid}")
+            if cached:
+                return str(cached)
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -2051,7 +2738,13 @@ def _tenant_name_by_id(tid: int) -> Optional[str]:
             )
             row = cur.fetchone()
             if row and row[0]:
-                return str(row[0])
+                name = str(row[0])
+                if rc:
+                    try:
+                        rc.setex(f"tenant:namebyid:{tid}", 300, name)
+                    except Exception:
+                        pass
+                return name
     except Exception:
         pass
     return None
@@ -2064,9 +2757,17 @@ def _now_local():
 @app.get("/api/usuarios-coordenadores")
 async def usuarios_coordenadores(request: Request):
     try:
+        rc = get_redis_client()
+        slug = request.headers.get('X-Tenant') or 'captar'
+        if rc:
+            try:
+                raw = rc.get(f"tenant:{str(slug).lower()}:usuarios:coordenadores")
+                if raw:
+                    return {"rows": json.loads(raw)}
+            except Exception:
+                pass
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            slug = request.headers.get('X-Tenant') or 'captar'
             if str(slug).lower() == 'captar':
                 cursor.execute(
                     f"SELECT \"IdUsuario\", \"Nome\" FROM \"{DB_SCHEMA}\".\"Usuarios\" WHERE UPPER(TRIM(\"Funcao\")) IN ('COORDENADOR','ADMINISTRADOR') ORDER BY \"Nome\" ASC"
@@ -2077,16 +2778,30 @@ async def usuarios_coordenadores(request: Request):
                     (_tenant_id_from_header(request),)
                 )
             rows = cursor.fetchall()
-            return {"rows": [{"IdUsuario": r[0], "Nome": r[1]} for r in rows]}
+            out = [{"IdUsuario": r[0], "Nome": r[1]} for r in rows]
+            if rc:
+                try:
+                    rc.setex(f"tenant:{str(slug).lower()}:usuarios:coordenadores", 60, json.dumps(out))
+                except Exception:
+                    pass
+            return {"rows": out}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/usuarios-supervisores")
 async def usuarios_supervisores(coordenador: str, request: Request):
     try:
+        rc = get_redis_client()
+        slug = request.headers.get('X-Tenant') or 'captar'
+        if rc:
+            try:
+                raw = rc.get(f"tenant:{str(slug).lower()}:usuarios:supervisores:{coordenador.strip()}")
+                if raw:
+                    return {"rows": json.loads(raw)}
+            except Exception:
+                pass
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            slug = request.headers.get('X-Tenant') or 'captar'
             if str(slug).lower() == 'captar':
                 cursor.execute(
                     f"SELECT \"IdUsuario\", \"Nome\" FROM \"{DB_SCHEMA}\".\"Usuarios\" WHERE UPPER(TRIM(\"Funcao\")) = 'SUPERVISOR' AND TRIM(\"Coordenador\") = %s ORDER BY \"Nome\" ASC",
@@ -2098,7 +2813,13 @@ async def usuarios_supervisores(coordenador: str, request: Request):
                     (coordenador.strip(), _tenant_id_from_header(request))
                 )
             rows = cursor.fetchall()
-            return {"rows": [{"IdUsuario": r[0], "Nome": r[1]} for r in rows]}
+            out = [{"IdUsuario": r[0], "Nome": r[1]} for r in rows]
+            if rc:
+                try:
+                    rc.setex(f"tenant:{str(slug).lower()}:usuarios:supervisores:{coordenador.strip()}", 60, json.dumps(out))
+                except Exception:
+                    pass
+            return {"rows": out}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

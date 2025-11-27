@@ -17,7 +17,8 @@ import json
 import csv
 import io
 import pandas as pd
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
+import time
 from urllib.request import urlopen
 import urllib.request
 from urllib.error import URLError, HTTPError
@@ -58,18 +59,173 @@ app.add_middleware(
 
 # Database Connection Helper
 @contextmanager
-def get_db_connection():
-    conn = psycopg.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD
-    )
+def get_db_connection(dsn: str | None = None):
+    if dsn and dsn.strip():
+        conn = psycopg.connect(dsn)
+    else:
+        conn = psycopg.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD
+        )
     try:
         yield conn
     finally:
         conn.close()
+
+_DSN_CACHE: Dict[str, Tuple[str, float]] = {}
+_DSN_TTL_SECONDS = 300
+
+def _get_tenant_dsn(slug: str) -> Optional[str]:
+    now = time.time()
+    ent = _DSN_CACHE.get(slug)
+    if ent and ent[1] > now:
+        return ent[0]
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT \"Valor\" FROM \"{DB_SCHEMA}\".\"TenantParametros\" WHERE \"Chave\" = %s AND \"IdTenant\" = (SELECT \"IdTenant\" FROM \"{DB_SCHEMA}\".\"Tenant\" WHERE \"Slug\" = %s LIMIT 1) LIMIT 1",
+                ('DB_DSN', slug)
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                dsn = str(row[0])
+                _DSN_CACHE[slug] = (dsn, now + _DSN_TTL_SECONDS)
+                return dsn
+            # Alternativamente, montar DSN por componentes
+            cur.execute(
+                f"SELECT \"Valor\" FROM \"{DB_SCHEMA}\".\"TenantParametros\" WHERE \"Chave\" IN ('DB_HOST','DB_PORT','DB_NAME','DB_USER','DB_PASSWORD') AND \"IdTenant\" = (SELECT \"IdTenant\" FROM \"{DB_SCHEMA}\".\"Tenant\" WHERE \"Slug\" = %s LIMIT 1)",
+                (slug,)
+            )
+            rows = cur.fetchall()
+            if rows and len(rows) >= 5:
+                # Este bloco pressupõe a ordem não garantida; optar por consulta separada por chave em produção
+                return None
+    except Exception:
+        pass
+    _DSN_CACHE.pop(slug, None)
+    return None
+
+def get_conn_for_request(request: Request):
+    slug = request.headers.get('X-Tenant') or 'captar'
+    dsn = _get_tenant_dsn(slug)
+    return get_db_connection(dsn)
+
+def _ensure_tenant_slug(slug: str, nome: Optional[str] = None) -> int:
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(f'SELECT "IdTenant" FROM "{DB_SCHEMA}"."Tenant" WHERE "Slug" = %s LIMIT 1', (slug,))
+        row = cur.fetchone()
+        if row:
+            return int(row[0])
+        nm = nome or slug.upper()
+        cur.execute(f'INSERT INTO "{DB_SCHEMA}"."Tenant" ("Nome","Slug","Status","Plano") VALUES (%s,%s,%s,%s) RETURNING "IdTenant"', (nm, slug, 'ATIVO', 'PADRAO'))
+        tid = int(cur.fetchone()[0])
+        conn.commit()
+        return tid
+
+def _upsert_tenant_param(id_tenant: int, chave: str, valor: str):
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(f'SELECT 1 FROM "{DB_SCHEMA}"."TenantParametros" WHERE "IdTenant"=%s AND "Chave"=%s', (id_tenant, chave))
+        exists = cur.fetchone() is not None
+        if exists:
+            cur.execute(f'UPDATE "{DB_SCHEMA}"."TenantParametros" SET "Valor"=%s, "AtualizadoEm"=NOW() WHERE "IdTenant"=%s AND "Chave"=%s', (valor, id_tenant, chave))
+        else:
+            cur.execute(f'INSERT INTO "{DB_SCHEMA}"."TenantParametros" ("IdTenant","Chave","Valor","Tipo","Descricao") VALUES (%s,%s,%s,%s,%s)', (id_tenant, chave, valor, 'STRING', 'DSN do banco do tenant'))
+        conn.commit()
+
+class SetDsnRequest(BaseModel):
+    dsn: str
+
+@app.post("/api/tenants/{slug}/set_dsn")
+async def tenants_set_dsn(slug: str, body: SetDsnRequest):
+    try:
+        tid = _ensure_tenant_slug(slug)
+        _upsert_tenant_param(tid, 'DB_DSN', body.dsn)
+        actions = apply_migrations_dsn(body.dsn)
+        return {"ok": True, "idTenant": tid, "actions": actions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class ProvisionTenantRequest(BaseModel):
+    nome: str
+    slug: str
+    db_name: str
+    db_host: str
+    db_port: str
+    db_user: str
+    db_password: str
+
+@app.post("/api/tenants/provision")
+async def tenants_provision(body: ProvisionTenantRequest):
+    try:
+        tid = _ensure_tenant_slug(body.slug, body.nome)
+        dsn = f"postgresql://{body.db_user}:{body.db_password}@{body.db_host}:{body.db_port}/{body.db_name}"
+        try:
+            with get_db_connection() as conn:
+                conn.autocommit = True
+                cur = conn.cursor()
+                cur.execute(f"SELECT 1 FROM pg_database WHERE datname = %s", (body.db_name,))
+                exists = cur.fetchone() is not None
+                if not exists:
+                    cur.execute(f"CREATE DATABASE \"{body.db_name}\"")
+        except Exception:
+            pass
+        _upsert_tenant_param(tid, 'DB_DSN', dsn)
+        actions = apply_migrations_dsn(dsn)
+        return {"ok": True, "idTenant": tid, "dsn": dsn, "actions": actions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class MigrateDataRequest(BaseModel):
+    slug: str
+
+@app.post("/api/tenants/migrate_data")
+async def tenants_migrate_data(body: MigrateDataRequest):
+    try:
+        slug = body.slug
+        with get_db_connection() as conn_src:
+            cur_src = conn_src.cursor()
+            cur_src.execute(f'SELECT "IdTenant" FROM "{DB_SCHEMA}"."Tenant" WHERE "Slug"=%s', (slug,))
+            row = cur_src.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Tenant não encontrado")
+            id_tenant = int(row[0])
+        dsn = _get_tenant_dsn(slug)
+        if not dsn:
+            raise HTTPException(status_code=400, detail="DSN não configurado para o tenant")
+        with get_db_connection() as conn_src:
+            cur_src = conn_src.cursor()
+            cur_src.execute(f'SELECT * FROM "{DB_SCHEMA}"."Usuarios" WHERE "IdTenant"=%s', (id_tenant,))
+            colnames = [desc[0] for desc in cur_src.description]
+            rows = cur_src.fetchall()
+        with get_db_connection(dsn) as conn_dst:
+            cur_dst = conn_dst.cursor()
+            for row in rows:
+                data = dict(zip(colnames, row))
+                if 'IdUsuario' in data:
+                    data.pop('IdUsuario')
+                keys = list(data.keys())
+                values = [data[k] for k in keys]
+                placeholders = ", ".join(["%s"] * len(values))
+                columns_sql = ", ".join([f'"{k}"' for k in keys])
+                try:
+                    cur_dst.execute(
+                        f"INSERT INTO \"{DB_SCHEMA}\".\"Usuarios\" ({columns_sql}) VALUES ({placeholders})",
+                        tuple(values)
+                    )
+                except Exception:
+                    pass
+            conn_dst.commit()
+        return {"ok": True, "migrated": len(rows)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 def apply_migrations():
     actions = []
@@ -217,6 +373,16 @@ def apply_migrations():
                 actions.append(f'{t}.IdTenant ensured')
             except Exception:
                 pass
+        # Índices para acelerar filtros frequentes
+        try:
+            cur.execute(f'CREATE INDEX IF NOT EXISTS ix_usuarios_idtenant ON "{DB_SCHEMA}"."Usuarios"("IdTenant")')
+            cur.execute(f'CREATE INDEX IF NOT EXISTS ix_usuarios_funcao ON "{DB_SCHEMA}"."Usuarios"(UPPER(TRIM("Funcao")))')
+            cur.execute(f'CREATE INDEX IF NOT EXISTS ix_usuarios_coordenador ON "{DB_SCHEMA}"."Usuarios"(TRIM("Coordenador"))')
+            cur.execute(f'CREATE INDEX IF NOT EXISTS ix_usuarios_supervisor ON "{DB_SCHEMA}"."Usuarios"(TRIM("Supervisor"))')
+            cur.execute(f'CREATE INDEX IF NOT EXISTS ix_usuarios_usuario ON "{DB_SCHEMA}"."Usuarios"(UPPER(TRIM("Usuario")))')
+            actions.append('Usuarios indexes ensured')
+        except Exception:
+            pass
             try:
                 cur.execute(
                     f"UPDATE \"{DB_SCHEMA}\".\"{t}\" SET \"IdTenant\" = (SELECT \"IdTenant\" FROM \"{DB_SCHEMA}\".\"Tenant\" WHERE \"Slug\" = %s LIMIT 1) WHERE \"IdTenant\" IS NULL",
@@ -255,6 +421,51 @@ def apply_migrations():
             actions.append('Usuarios.Ativista ensured')
         except Exception:
             pass
+    return actions
+
+def apply_migrations_dsn(dsn: str):
+    actions = []
+    with get_db_connection(dsn) as conn:
+        conn.autocommit = True
+        cur = conn.cursor()
+        try:
+            cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{DB_SCHEMA}"')
+        except Exception:
+            pass
+        try:
+            import os
+            base_dir = os.path.dirname(__file__)
+            schema_path = os.path.join(base_dir, 'schema.sql')
+            if os.path.exists(schema_path):
+                with open(schema_path, 'r', encoding='utf-8') as f:
+                    sql = f.read()
+                    cur.execute(sql)
+                    actions.append('schema.sql executed')
+        except Exception:
+            pass
+        targets = [
+            ("Usuarios", "Celular"),
+        ]
+        for table_name, column_name in targets:
+            try:
+                cur.execute(
+                    """
+                    SELECT character_maximum_length
+                    FROM information_schema.columns
+                    WHERE table_schema = %s AND table_name = %s AND column_name = %s
+                    """,
+                    (DB_SCHEMA, table_name, column_name)
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    max_len = row[0]
+                    if max_len is not None and max_len < 15:
+                        cur.execute(
+                            f"ALTER TABLE \"{DB_SCHEMA}\".\"{table_name}\" ALTER COLUMN \"{column_name}\" TYPE VARCHAR(15)"
+                        )
+                        actions.append(f'{table_name}.{column_name} -> VARCHAR(15)')
+            except Exception:
+                pass
     return actions
 
 @app.on_event("startup")
@@ -342,6 +553,22 @@ async def admin_migrate():
         return {"ok": True, "actions": actions}
     except HTTPException as e:
         raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/migrate_all_tenants")
+async def admin_migrate_all_tenants():
+    try:
+        results = []
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(f'SELECT t."Slug", p."Valor" FROM "{DB_SCHEMA}"."Tenant" t JOIN "{DB_SCHEMA}"."TenantParametros" p ON p."IdTenant" = t."IdTenant" AND p."Chave" = %s', ('DB_DSN',))
+            rows = cur.fetchall()
+        for slug, dsn in rows:
+            if dsn:
+                actions = apply_migrations_dsn(str(dsn))
+                results.append({"slug": slug, "actions": actions})
+        return {"ok": True, "results": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -442,7 +669,7 @@ class NotificacaoCreate(BaseModel):
 @app.post("/api/auth/login")
 async def login(request: LoginRequest, req: Request):
     try:
-        with get_db_connection() as conn:
+        with get_conn_for_request(req) as conn:
             cursor = conn.cursor()
             tid = _tenant_id_from_header(req)
             cursor.execute(
@@ -506,7 +733,7 @@ async def usuarios_schema():
 @app.get("/api/usuarios")
 async def usuarios_list(limit: int = 200, request: Request = None):
     try:
-        with get_db_connection() as conn:
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
             slug = request.headers.get('X-Tenant') if request else 'captar'
             if str(slug or '').lower() == 'captar':
@@ -579,7 +806,7 @@ async def usuarios_create(payload: dict, request: Request):
         values = [data[k] for k in keys]
         placeholders = ", ".join(["%s"] * len(values))
         columns_sql = ", ".join([f'"{k}"' for k in keys])
-        with get_db_connection() as conn:
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 f"INSERT INTO \"{DB_SCHEMA}\".\"Usuarios\" ({columns_sql}) VALUES ({placeholders}) RETURNING \"IdUsuario\"",
@@ -658,7 +885,7 @@ async def usuarios_update(id: int, payload: dict, request: Request):
             raise HTTPException(status_code=400, detail="Nenhum campo válido para atualizar")
         set_parts = ", ".join([f'"{k}"=%s' for k in keys])
         values = [data[k] for k in keys]
-        with get_db_connection() as conn:
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
             try:
                 cursor.execute(
@@ -688,9 +915,9 @@ async def usuarios_update(id: int, payload: dict, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/usuarios/{id}")
-async def usuarios_delete(id: int):
+async def usuarios_delete(id: int, request: Request):
     try:
-        with get_db_connection() as conn:
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
             cursor.execute(f"DELETE FROM \"{DB_SCHEMA}\".\"Usuarios\" WHERE \"IdUsuario\" = %s", (id,))
             conn.commit()
@@ -1810,6 +2037,21 @@ def _tenant_id_by_name(name: str):
             row = cur.fetchone()
             if row and row[0] is not None:
                 return int(row[0])
+    except Exception:
+        pass
+    return None
+
+def _tenant_name_by_id(tid: int) -> Optional[str]:
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT \"Nome\" FROM \"{DB_SCHEMA}\".\"Tenant\" WHERE \"IdTenant\" = %s LIMIT 1",
+                (tid,)
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                return str(row[0])
     except Exception:
         pass
     return None

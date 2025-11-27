@@ -1,3 +1,4 @@
+import React from 'react'
 import { Layout, Button, Dropdown, Avatar, Menu } from 'antd'
 import Logo from '../images/CAPTAR LOGO OFICIAL.jpg'
 import { LogoutOutlined, UserOutlined, DownOutlined, DashboardOutlined, TeamOutlined, FileTextOutlined, SettingOutlined, ApiOutlined } from '@ant-design/icons'
@@ -11,7 +12,7 @@ import { ptBR } from 'date-fns/locale'
 
 const { Header } = Layout
 
-export default function Navbar() {
+function Navbar() {
   const navigate = useNavigate()
   const location = useLocation()
   const { user, logout } = useAuthStore()
@@ -113,11 +114,18 @@ export default function Navbar() {
       key: 'parametros',
       icon: <FileTextOutlined />,
       label: 'PARÂMETROS',
-      children: [
-        { key: '/parametros/metas', icon: <FileTextOutlined />, label: 'METAS', onClick: () => navigate('/parametros/metas') },
-        { key: '/parametros/tenants', icon: <FileTextOutlined />, label: 'TENANTS', onClick: () => navigate('/parametros/tenants') },
-        { key: '/parametros/tenant-parametros', icon: <FileTextOutlined />, label: 'TENANT PARÂMETROS', onClick: () => navigate('/parametros/tenant-parametros') },
-      ],
+      children: (() => {
+        const items = [
+          { key: '/parametros/metas', icon: <FileTextOutlined />, label: 'METAS', onClick: () => navigate('/parametros/metas') },
+          { key: '/parametros/tenants', icon: <FileTextOutlined />, label: 'TENANTS', onClick: () => navigate('/parametros/tenants') },
+          { key: '/parametros/tenant-parametros', icon: <FileTextOutlined />, label: 'TENANT PARÂMETROS', onClick: () => navigate('/parametros/tenant-parametros') },
+        ]
+        const slug = String(tenantSlug || '').toLowerCase()
+        if (slug !== 'captar') {
+          return items.filter(i => i.key !== '/parametros/tenants' && i.key !== '/parametros/tenant-parametros')
+        }
+        return items
+      })(),
     },
   ]
 
@@ -166,3 +174,5 @@ export default function Navbar() {
     </Header>
   )
 }
+
+export default React.memo(Navbar)

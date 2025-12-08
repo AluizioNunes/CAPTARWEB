@@ -1,4 +1,4 @@
-import { Modal, Form, Input, Select, Button, Space, Avatar, App } from 'antd'
+import { Modal, Form, Input, Select, Button, Space, Avatar } from 'antd'
 import { SaveOutlined, CloseCircleOutlined } from '@ant-design/icons'
 import { useEffect, useMemo, useState } from 'react'
 import { useApi } from '../context/ApiContext'
@@ -18,7 +18,6 @@ export default function TenantsModal({ open, initial, onCancel, onSaved }: Props
   const [form] = Form.useForm()
   const api = useApi()
   const { user } = useAuthStore()
-  const { message } = App.useApp()
   const [connectionText, setConnectionText] = useState('')
   const loginDateObj = useMemo(() => {
     const lt = (user as any)?.login_time
@@ -62,12 +61,10 @@ export default function TenantsModal({ open, initial, onCancel, onSaved }: Props
       if (initial?.IdTenant) {
         await api.updateTenant(initial.IdTenant, values)
         const row = { ...initial, ...values }
-        message.success('Tenant atualizado')
         onSaved(row)
       } else {
         const res = await api.createTenant(values)
         const row = { IdTenant: res.id, Nome: values.Nome, Slug: values.Slug, Status: values.Status ?? 'ATIVO', Plano: values.Plano ?? 'PADRAO' }
-        message.success('Tenant criado')
         onSaved(row)
       }
     } catch {}

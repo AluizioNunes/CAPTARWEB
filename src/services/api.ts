@@ -574,14 +574,9 @@ class ApiService {
       const response = await this.api.delete('/tenants/delete_all', { data: { slug } })
       return response.data
     } catch (e: any) {
-      try {
-        const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
-        const response = await fb.delete('/tenants/delete_all', { data: { slug } })
-        return response.data
-      } catch (e2: any) {
-        const response = await this.api.delete(`/tenants/${slug}/delete_all`)
-        return response.data
-      }
+      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const response = await fb.delete('/tenants/delete_all', { data: { slug } })
+      return response.data
     }
   }
 
@@ -621,14 +616,9 @@ class ApiService {
       const response = await this.api.post('/tenants/recreate_db', { slug })
       return response.data
     } catch (e: any) {
-      try {
-        const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
-        const response = await fb.post('/tenants/recreate_db', { slug })
-        return response.data
-      } catch (e2: any) {
-        const response = await this.api.post(`/tenants/${slug}/recreate_db`)
-        return response.data
-      }
+      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const response = await fb.post('/tenants/recreate_db', { slug })
+      return response.data
     }
   }
 

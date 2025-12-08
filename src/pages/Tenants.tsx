@@ -1,21 +1,29 @@
 import { useEffect, useState } from 'react'
-import { Table, Button, Space, message, Modal, Form, Input, Select, Tag } from 'antd'
+import { Table, Button, Space, Modal, Tag, Dropdown, Checkbox, App } from 'antd'
 import { motion } from 'framer-motion'
 import { useApi } from '../context/ApiContext'
+import { useAuthStore } from '../store/authStore'
+import TenantsModal from '../components/TenantsModal'
+import TenantProvisionModal from '../components/TenantProvisionModal'
+import DsnViewModal from '../components/DsnViewModal'
 
 export default function Tenants() {
   const api = useApi()
+  const { message, modal } = App.useApp()
   const [data, setData] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<any | null>(null)
-  const [form] = Form.useForm()
   const [provOpen, setProvOpen] = useState(false)
-  const [provForm] = Form.useForm()
+  const [provInit, setProvInit] = useState<{ nome?: string; slug?: string; db_name?: string; db_host?: string; db_port?: string; db_user?: string; db_password?: string } | undefined>(undefined)
   const [dsnViewOpen, setDsnViewOpen] = useState(false)
   const [dsnView, setDsnView] = useState<string>('')
+  const [visibleCols, setVisibleCols] = useState<Record<string, boolean>>({})
+  const [orderedKeys, setOrderedKeys] = useState<string[]>([])
+  const { user } = useAuthStore()
+  const [deleteChoice, setDeleteChoice] = useState<{ open: boolean; record?: any }>({ open: false })
 
-  const load = async () => {
+  const refresh = async () => {
     try {
       setLoading(true)
       const res = await api.listTenants()
@@ -24,12 +32,22 @@ export default function Tenants() {
         try {
           const prm = await api.listTenantParametros(r.IdTenant)
           const dsn = (prm.rows || []).find((p: any) => String(p.Chave || p.chave).toUpperCase() === 'DB_DSN')
-          return { ...r, __db__: !!dsn }
+          const dcreated = (prm.rows || []).find((p: any) => String(p.Chave || p.chave).toUpperCase() === 'DB_CREATED_AT')
+          return { ...r, __db__: !!dsn, __db_created_at__: dcreated ? String(dcreated.Valor || dcreated.valor || '') : '' }
         } catch {
-          return { ...r, __db__: false }
+          return { ...r, __db__: false, __db_created_at__: '' }
         }
       }))
       setData(withDb)
+      const defaultOrder = ['IdTenant','Nome','Slug','Status','Plano','DataCadastro','DataUpdate']
+      const visKey = `tenants.columns.visible.${(user as any)?.usuario || 'default'}`
+      const savedVis = localStorage.getItem(visKey)
+      const visDefault: Record<string, boolean> = {}
+      for (const n of defaultOrder) visDefault[n] = true
+      setVisibleCols(savedVis ? JSON.parse(savedVis) : { ...visDefault, __db__: true, __db_created_at__: true })
+      const orderKey = `tenants.columns.order.${(user as any)?.usuario || 'default'}`
+      const savedOrder = localStorage.getItem(orderKey)
+      setOrderedKeys(savedOrder ? JSON.parse(savedOrder) : defaultOrder)
     } catch (e: any) {
       message.error(e?.response?.data?.detail || 'Erro ao carregar tenants')
     } finally {
@@ -37,47 +55,77 @@ export default function Tenants() {
     }
   }
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { refresh() }, [])
 
-  const handleSave = async () => {
-    try {
-      const values = await form.validateFields()
-      if (editing?.IdTenant) {
-        await api.updateTenant(editing.IdTenant, values)
-        message.success('Tenant atualizado')
-        setData((prev) => prev.map(r => r.IdTenant === editing.IdTenant ? { ...r, ...values } : r))
-      } else {
-        const res = await api.createTenant(values)
-        const newRow = { IdTenant: res.id, Nome: values.Nome, Slug: values.Slug, Status: values.Status ?? 'ATIVO', Plano: values.Plano ?? 'PADRAO' }
-        setData((prev) => [newRow, ...prev])
-        message.success('Tenant criado')
-      }
-      setModalOpen(false)
-      setEditing(null)
-      load()
-    } catch {}
+  const titleMap: Record<string, string> = {
+    IdTenant: 'ID',
+    Nome: 'NOME',
+    Slug: 'SLUG',
+    Status: 'STATUS',
+    Plano: 'PLANO',
+    DataCadastro: 'DATA E HORA DE CADASTRO',
+    DataUpdate: 'DATA UPDATE'
   }
+  const centerCols = new Set(['IdTenant','Status','Plano','DataCadastro','DataUpdate'])
+  const baseColumns = ['IdTenant','Nome','Slug','Status','Plano','DataCadastro','DataUpdate'].map((dataIndex) => {
+    const colObj: any = {
+      title: titleMap[dataIndex] || dataIndex.toUpperCase(),
+      dataIndex,
+      align: centerCols.has(dataIndex) ? 'center' : 'left',
+      sorter: (a: any, b: any) => {
+        const av = a[dataIndex]
+        const bv = b[dataIndex]
+        if (av === undefined || av === null) return -1
+        if (bv === undefined || bv === null) return 1
+        if (dataIndex === 'IdTenant') return Number(bv) - Number(av)
+        if (dataIndex.includes('Data')) return new Date(av).getTime() - new Date(bv).getTime()
+        return String(av).toUpperCase().localeCompare(String(bv).toUpperCase())
+      },
+      sortDirections: ['ascend','descend'] as any,
+      render: (v: any) => {
+        if (v === null || v === undefined) return ''
+        if (dataIndex.includes('Data')) {
+          const d = new Date(v)
+          if (!isNaN(d.getTime())) return d.toLocaleString('pt-BR', { hour12: false })
+        }
+        return String(v).toUpperCase()
+      },
+      onHeaderCell: () => ({
+        draggable: true,
+        onDragStart: (e: any) => { e.dataTransfer.setData('text/plain', dataIndex) },
+        onDragOver: (e: any) => { e.preventDefault() },
+        onDrop: (e: any) => {
+          const from = e.dataTransfer.getData('text/plain')
+          const to = dataIndex
+          if (!from || from === to) return
+          setOrderedKeys((prev) => {
+            const next = prev.filter(k => k !== from)
+            const idx = next.indexOf(to)
+            if (idx === -1) return prev
+            next.splice(idx, 0, from)
+            const orderKey = `tenants.columns.order.${(user as any)?.usuario || 'default'}`
+            localStorage.setItem(orderKey, JSON.stringify(next))
+            return next
+          })
+        }
+      })
+    }
+    if (dataIndex === 'IdTenant') colObj.defaultSortOrder = 'descend'
+    return colObj
+  })
 
-  const columns = [
-    { title: 'ID', dataIndex: 'IdTenant' },
-    { title: 'NOME', dataIndex: 'Nome' },
-    { title: 'SLUG', dataIndex: 'Slug' },
-    { title: 'STATUS', dataIndex: 'Status' },
-    { title: 'PLANO', dataIndex: 'Plano' },
-    { title: 'ATUALIZADO', dataIndex: 'DataUpdate' },
-    { title: 'DB', dataIndex: '__db__',
-      onCell: (_record: any) => ({
-        title: 'Estado do DSN do Tenant'
-      }),
-      render: (v: any) => (v ? <Tag color="green">CONFIGURADO</Tag> : <Tag>NAO CONFIGURADO</Tag>)
-    },
+  const extraColumns: any[] = [
+    { title: 'DB', dataIndex: '__db__', onCell: () => ({ title: 'Estado do DSN do Tenant' }), render: (v: any) => (v ? <Tag color="green">CRIADO</Tag> : <Tag>NAO CRIADO</Tag>) },
+    { title: 'DB CRIADO', dataIndex: '__db_created_at__', render: (v: any) => (v ? new Date(v).toLocaleString('pt-BR', { hour12: false }) : '—') },
     {
       title: 'AÇÕES',
       dataIndex: '__actions__',
       render: (_: any, record: any) => (
         <Space>
-          <Button type="text" onClick={() => { setEditing(record); form.setFieldsValue(record); setModalOpen(true) }}>EDITAR</Button>
-          <Button type="text" danger onClick={async () => { try { await api.deleteTenant(record.IdTenant); message.success('Tenant deletado'); await load() } catch (e: any) { message.error(e?.response?.data?.detail || 'Erro ao deletar') } }}>DELETAR</Button>
+          <Button type="text" onClick={() => { setEditing(record); setModalOpen(true) }}>EDITAR</Button>
+          <Button type="text" danger onClick={() => {
+            setDeleteChoice({ open: true, record })
+          }}>DELETAR</Button>
           <Button type="text" onClick={async () => {
             try {
               const res = await api.listTenantParametros(record.IdTenant)
@@ -86,80 +134,129 @@ export default function Tenants() {
               setDsnViewOpen(true)
             } catch { setDsnView('—'); setDsnViewOpen(true) }
           }}>VER DSN</Button>
-          <Button type="primary" onClick={() => {
-            const id = record.IdTenant
-            const slug = String(record.Slug || '').toLowerCase()
-            const nome = String(record.Nome || '')
-            const db_name = `captar_t${String(id).padStart(2,'0')}_${slug}`
-            provForm.setFieldsValue({ nome, slug, db_name, db_host: 'postgres', db_port: '5432', db_user: 'captar', db_password: 'captar' })
-            setProvOpen(true)
-          }}>CRIAR BANCO DE DADOS</Button>
+          {record.__db__ ? (
+            <Button danger onClick={() => {
+              modal.confirm({
+                title: 'Deseja realmente apagar o banco e recriá-lo?',
+                okText: 'Sobrescrever',
+                okButtonProps: { danger: true },
+                cancelText: 'Cancelar',
+                onOk: async () => {
+                  try {
+                    const slug = String(record.Slug || '').toLowerCase()
+                    const res = await api.recreateTenantDb(slug)
+                    message.success(`Banco recriado: ${res.dsn}`)
+                    await refresh()
+                  } catch (e: any) {
+                    message.error(e?.response?.data?.detail || 'Erro ao sobrescrever banco')
+                  }
+                }
+              })
+            }}>SOBRESCREVER O BANCO DE DADOS</Button>
+          ) : (
+            <Button type="primary" onClick={() => {
+              const id = record.IdTenant
+              const slug = String(record.Slug || '').toLowerCase()
+              const nome = String(record.Nome || '')
+              const db_name = `captar_t${String(id).padStart(2,'0')}_${slug}`
+              setProvInit({ nome, slug, db_name, db_host: 'postgres', db_port: '5432', db_user: 'captar', db_password: 'captar' })
+              setProvOpen(true)
+            }}>CRIAR BANCO DE DADOS</Button>
+          )}
         </Space>
       )
     }
   ]
 
+  const orderedVisible = orderedKeys.length ? orderedKeys : baseColumns.map(c => c.dataIndex)
+  const visibleColumns = orderedVisible
+    .map(k => baseColumns.find(c => c.dataIndex === k))
+    .filter(Boolean)
+    .filter((c: any) => visibleCols[(c as any).dataIndex])
+    .concat(extraColumns)
+
   return (
     <motion.div className="page-container" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
         <Space>
-          <Button type="primary" onClick={() => { setEditing(null); form.resetFields(); setModalOpen(true) }}>NOVO TENANT</Button>
+          <Dropdown placement="bottomRight" trigger={["click"]} menu={{ items: [] }} popupRender={() => (
+            <div style={{ padding: 12 }}>
+              {Object.keys(visibleCols).map(k => (
+                <div key={k} style={{ marginBottom: 6 }}>
+                  <Checkbox checked={!!visibleCols[k]} onChange={(e) => {
+                    const next = { ...visibleCols, [k]: e.target.checked }
+                    setVisibleCols(next)
+                    const visKey = `tenants.columns.visible.${(user as any)?.usuario || 'default'}`
+                    localStorage.setItem(visKey, JSON.stringify(next))
+                  }}>{k.toUpperCase()}</Checkbox>
+                </div>
+              ))}
+            </div>
+          )}>
+            <Button shape="circle" style={{ background: '#FFD700', borderColor: '#FFD700', color: '#000' }} title="VISUALIZAÇÃO DE COLUNAS" />
+          </Dropdown>
+          <Button shape="circle" style={{ background: '#FFD700', borderColor: '#FFD700', color: '#000' }} onClick={() => { setEditing(null); setModalOpen(true) }} title="NOVO TENANT" />
         </Space>
       </div>
-      <Table rowKey={(r) => r.IdTenant || JSON.stringify(r)} loading={loading} dataSource={data} columns={columns as any} bordered size="middle" />
-      <Modal open={modalOpen} title={editing?.IdTenant ? 'Editar Tenant' : 'Novo Tenant'} onCancel={() => setModalOpen(false)} onOk={handleSave}>
-        <Form form={form} layout="vertical">
-          <Form.Item name="Nome" label="Nome" rules={[{ required: true }]}> 
-            <Input />
-          </Form.Item>
-          <Form.Item name="Slug" label="Slug" rules={[{ required: true }]}> 
-            <Input />
-          </Form.Item>
-          <Form.Item name="Status" label="Status"> 
-            <Select options={[{ value: 'ATIVO', label: 'ATIVO' }, { value: 'INATIVO', label: 'INATIVO' }]} />
-          </Form.Item>
-          <Form.Item name="Plano" label="Plano"> 
-            <Select options={[{ value: 'PADRAO', label: 'PADRÃO' }, { value: 'PRO', label: 'PRO' }]} />
-          </Form.Item>
-        </Form>
-      </Modal>
-      <Modal open={provOpen} title={'Criar Banco de Dados do Tenant'} onCancel={() => setProvOpen(false)} onOk={async () => {
-        try {
-          const values = await provForm.validateFields()
-          const res = await api.provisionTenant(values)
-          message.success(`Banco provisionado: ${res.dsn}`)
-          setProvOpen(false)
-          await load()
-        } catch (e: any) {
-          message.error(e?.response?.data?.detail || 'Erro ao provisionar banco')
-        }
-      }}>
-        <Form form={provForm} layout="vertical">
-          <Form.Item name="nome" label="Nome" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="slug" label="Slug" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="db_name" label="Nome do Banco" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="db_host" label="Host" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="db_port" label="Porta" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="db_user" label="Usuário" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="db_password" label="Senha" rules={[{ required: true }]}>
-            <Input.Password />
-          </Form.Item>
-        </Form>
-      </Modal>
-      <Modal open={dsnViewOpen} title={'DSN do Tenant'} onCancel={() => setDsnViewOpen(false)} footer={null}>
-        <div style={{ fontFamily: 'monospace' }}>{dsnView || '—'}</div>
+      <style>{`
+        .tenants-table .ant-table-thead > tr > th{ background:#FFD700; color:#000; font-family: 'Arimo', Arial, sans-serif; }
+        .tenants-table .ant-table-thead > tr > th .ant-table-column-title{ display:flex; justify-content:center; align-items:center; text-align:center; }
+        .tenants-table .ant-table-tbody > tr > td{ font-family: 'Roboto Condensed', Arial, sans-serif; padding:2px 6px; line-height:0.95; height:22px; }
+      `}</style>
+      <Table rowKey={(r) => r.IdTenant || JSON.stringify(r)} loading={loading} dataSource={data} columns={visibleColumns as any} bordered size="small" className="ant-table-striped tenants-table" />
+      <TenantsModal
+        open={modalOpen}
+        initial={editing || undefined}
+        onCancel={() => setModalOpen(false)}
+        onSaved={async (row) => { setModalOpen(false); setEditing(null); setData((prev) => [row, ...prev].filter((v,i,self) => self.findIndex(x => Number(x.IdTenant) === Number(v.IdTenant)) === i)); await refresh() }}
+      />
+      <TenantProvisionModal
+        open={provOpen}
+        initial={provInit}
+        onCancel={() => setProvOpen(false)}
+        onSaved={async () => { setProvOpen(false); await refresh() }}
+      />
+      <DsnViewModal open={dsnViewOpen} dsn={dsnView} onCancel={() => setDsnViewOpen(false)} />
+      <Modal
+        open={deleteChoice.open}
+        title={'Apagar Tenant'}
+        onCancel={() => setDeleteChoice({ open: false })}
+        footer={null}
+      >
+        <style>{`.tenants-delete-modal .ant-modal-header{ border-bottom: 1px solid #e8e8e8; } .tenants-delete-modal .ant-modal-content{ border-radius: 0 !important; }`}</style>
+        <div style={{ marginBottom: 16, fontSize: 14 }}>
+          Esta ação pode remover o tenant e opcionalmente o seu banco de dados.
+        </div>
+        <Space style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
+          <Button onClick={() => setDeleteChoice({ open: false })}>Cancelar</Button>
+          <Button danger style={{ borderRadius: 20 }} onClick={async () => {
+            try {
+              const rec = deleteChoice.record
+              if (!rec) return
+              await api.deleteTenant(Number(rec.IdTenant))
+              setData((prev) => prev.filter(r => Number(r.IdTenant) !== Number(rec.IdTenant)))
+              message.success('Tenant apagado (banco mantido)')
+              setDeleteChoice({ open: false })
+              await refresh()
+            } catch (e: any) {
+              message.error(e?.response?.data?.detail || 'Erro ao deletar tenant')
+            }
+          }}>Deletar somente o tenant (manter banco)</Button>
+          <Button danger type="primary" style={{ borderRadius: 20 }} onClick={async () => {
+            try {
+              const rec = deleteChoice.record
+              if (!rec) return
+              const slug = String(rec.Slug || '').toLowerCase()
+              await api.deleteTenantAndDb(slug)
+              setData((prev) => prev.filter(r => Number(r.IdTenant) !== Number(rec.IdTenant)))
+              message.success('Tenant e banco apagados')
+              setDeleteChoice({ open: false })
+              await refresh()
+            } catch (e: any) {
+              message.error(e?.response?.data?.detail || 'Erro ao deletar tenant e banco')
+            }
+          }}>Deletar tenant e banco de dados</Button>
+        </Space>
       </Modal>
     </motion.div>
   )

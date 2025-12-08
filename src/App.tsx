@@ -1,7 +1,7 @@
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom'
-import { Layout } from 'antd'
+import { Layout, App as AntApp } from 'antd'
 import { useAuthStore } from './store/authStore'
-import Navbar from './components/Navbar'
+import AppShell from './components/AppShell'
 import Login from './pages/Login'
 import Eleitor from './pages/Eleitor'
 import Ativista from './pages/Ativista'
@@ -17,6 +17,12 @@ const Dashboard = lazy(() => import('./pages/Dashboard'))
 const Estatisticas = lazy(() => import('./pages/Estatisticas'))
 const Tenants = lazy(() => import('./pages/Tenants'))
 const TenantParametros = lazy(() => import('./pages/TenantParametros'))
+const AlmoxEstoque = lazy(() => import('./modules/almoxarifado/Estoque'))
+const AlmoxEntradas = lazy(() => import('./modules/almoxarifado/Entradas'))
+const AlmoxSaidas = lazy(() => import('./modules/almoxarifado/Saidas'))
+const AlmoxFornecedores = lazy(() => import('./modules/almoxarifado/Fornecedores'))
+const AlmoxPedidos = lazy(() => import('./modules/almoxarifado/Pedidos'))
+const AlmoxRelatorios = lazy(() => import('./modules/almoxarifado/Relatorios'))
 import './App.css'
 import { AnimatePresence, motion } from 'framer-motion'
 
@@ -48,6 +54,36 @@ function AppRoutes() {
               <Estatisticas />
             </Suspense>
           ) : <Navigate to="/login" />} />
+          <Route path="/almox/estoque" element={isAuthenticated ? (
+            <Suspense fallback={<div style={{ padding: 24 }}>Carregando...</div>}>
+              <AlmoxEstoque />
+            </Suspense>
+          ) : <Navigate to="/login" />} />
+          <Route path="/almox/entradas" element={isAuthenticated ? (
+            <Suspense fallback={<div style={{ padding: 24 }}>Carregando...</div>}>
+              <AlmoxEntradas />
+            </Suspense>
+          ) : <Navigate to="/login" />} />
+          <Route path="/almox/saidas" element={isAuthenticated ? (
+            <Suspense fallback={<div style={{ padding: 24 }}>Carregando...</div>}>
+              <AlmoxSaidas />
+            </Suspense>
+          ) : <Navigate to="/login" />} />
+          <Route path="/almox/fornecedores" element={isAuthenticated ? (
+            <Suspense fallback={<div style={{ padding: 24 }}>Carregando...</div>}>
+              <AlmoxFornecedores />
+            </Suspense>
+          ) : <Navigate to="/login" />} />
+          <Route path="/almox/pedidos" element={isAuthenticated ? (
+            <Suspense fallback={<div style={{ padding: 24 }}>Carregando...</div>}>
+              <AlmoxPedidos />
+            </Suspense>
+          ) : <Navigate to="/login" />} />
+          <Route path="/almox/relatorios" element={isAuthenticated ? (
+            <Suspense fallback={<div style={{ padding: 24 }}>Carregando...</div>}>
+              <AlmoxRelatorios />
+            </Suspense>
+          ) : <Navigate to="/login" />} />
           <Route path="/consultas" element={isAuthenticated ? <Consultas /> : <Navigate to="/login" />} />
           <Route path="/integracoes" element={isAuthenticated ? <Integracoes /> : <Navigate to="/login" />} />
           <Route path="/parametros/metas" element={isAuthenticated ? <Metas /> : <Navigate to="/login" />} />
@@ -72,12 +108,13 @@ function App() {
   const { isAuthenticated } = useAuthStore()
   return (
     <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-      {isAuthenticated && <Navbar />}
-      <Layout>
-        <Content className="app-content">
-          <AppRoutes />
-        </Content>
-      </Layout>
+      <AntApp>
+        <AppShell>
+          <Content className="app-content">
+            <AppRoutes />
+          </Content>
+        </AppShell>
+      </AntApp>
     </Router>
   )
 }

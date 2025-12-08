@@ -2180,12 +2180,117 @@ async def tenants_create(payload: dict):
                 _upsert_tenant_param(new_id, 'DB_DSN', dsn)
             except Exception:
                 pass
+            try:
+                _upsert_tenant_param(new_id, 'DB_CREATED_AT', datetime.now().isoformat())
+            except Exception:
+                pass
             # Aplicar migrações no DB do tenant e inserir ADMIN
             try:
                 actions = apply_migrations_dsn(dsn, slug)
             except Exception:
                 actions = []
             return {"id": new_id, "dsn": dsn, "actions": actions}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/tenants/{slug}/recreate_db")
+async def tenants_recreate_db(slug: str):
+    try:
+        s = str(slug or '').lower()
+        if s == 'captar':
+            raise HTTPException(status_code=400, detail='Tenant CAPTAR não pode ser recriado')
+        with get_db_connection() as conn:
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute(f'SELECT "IdTenant" FROM "{DB_SCHEMA}"."Tenant" WHERE LOWER("Slug")=%s LIMIT 1', (s,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail='Tenant não encontrado')
+            id_tenant = int(row[0])
+            db_name = f"captar_t{str(id_tenant).zfill(2)}_{s}"
+            cur.execute('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s', (db_name,))
+            try:
+                cur.execute(f'DROP DATABASE IF EXISTS "{db_name}"')
+            except Exception:
+                pass
+            cur.execute(f'CREATE DATABASE "{db_name}"')
+            dsn = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{db_name}"
+            _upsert_tenant_param(id_tenant, 'DB_DSN', dsn)
+            actions = apply_migrations_dsn(dsn, s)
+            _upsert_tenant_param(id_tenant, 'DB_CREATED_AT', datetime.now().isoformat())
+            return {"ok": True, "idTenant": id_tenant, "dsn": dsn, "actions": actions}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/tenants/{slug}/delete_all")
+async def tenants_delete_all(slug: str):
+    try:
+        s = str(slug or '').lower()
+        if s == 'captar':
+            raise HTTPException(status_code=400, detail='Tenant CAPTAR não pode ser deletado')
+        with get_db_connection() as conn:
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute(f'SELECT "IdTenant" FROM "{DB_SCHEMA}"."Tenant" WHERE LOWER("Slug")=%s LIMIT 1', (s,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail='Tenant não encontrado')
+            id_tenant = int(row[0])
+            db_name = f"captar_t{str(id_tenant).zfill(2)}_{s}"
+            try:
+                cur.execute('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s', (db_name,))
+            except Exception:
+                pass
+            try:
+                cur.execute(f'DROP DATABASE IF EXISTS "{db_name}"')
+            except Exception:
+                pass
+            try:
+                cur.execute(f'DELETE FROM "{DB_SCHEMA}"."Usuarios" WHERE "IdTenant"=%s', (id_tenant,))
+            except Exception:
+                pass
+            try:
+                cur.execute(f'DELETE FROM "{DB_SCHEMA}"."Perfil" WHERE "IdTenant"=%s', (id_tenant,))
+            except Exception:
+                pass
+            try:
+                cur.execute(f'DELETE FROM "{DB_SCHEMA}"."Funcoes" WHERE "IdTenant"=%s', (id_tenant,))
+            except Exception:
+                pass
+            try:
+                cur.execute(f'DELETE FROM "{DB_SCHEMA}"."TenantParametros" WHERE "IdTenant"=%s', (id_tenant,))
+            except Exception:
+                pass
+            cur.execute(f'DELETE FROM "{DB_SCHEMA}"."Tenant" WHERE "IdTenant"=%s', (id_tenant,))
+            return {"ok": True, "deleted": id_tenant, "dropped": db_name}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/tenants/recreate_db")
+async def tenants_recreate_db_body(body: dict):
+    try:
+        slug = str(body.get('slug') or '').lower()
+        if not slug:
+            raise HTTPException(status_code=400, detail='slug obrigatório')
+        return await tenants_recreate_db(slug)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/tenants/delete_all")
+async def tenants_delete_all_body(body: dict):
+    try:
+        slug = str(body.get('slug') or '').lower()
+        if not slug:
+            raise HTTPException(status_code=400, detail='slug obrigatório')
+        return await tenants_delete_all(slug)
     except HTTPException:
         raise
     except Exception as e:

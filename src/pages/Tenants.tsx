@@ -28,16 +28,7 @@ export default function Tenants() {
       setLoading(true)
       const res = await api.listTenants()
       const rows = (res.rows || [])
-      const withDb = await Promise.all(rows.map(async (r: any) => {
-        try {
-          const prm = await api.listTenantParametros(r.IdTenant)
-          const dsn = (prm.rows || []).find((p: any) => String(p.Chave || p.chave).toUpperCase() === 'DB_DSN')
-          const dcreated = (prm.rows || []).find((p: any) => String(p.Chave || p.chave).toUpperCase() === 'DB_CREATED_AT')
-          return { ...r, __db__: !!dsn, __db_created_at__: dcreated ? String(dcreated.Valor || dcreated.valor || '') : '' }
-        } catch {
-          return { ...r, __db__: false, __db_created_at__: '' }
-        }
-      }))
+      const withDb = rows.map((r: any) => ({ ...r, __db__: !!r.Dsn, __db_created_at__: r.DbCreatedAt || r.dbCreatedAt || '' }))
       setData(withDb)
       const defaultOrder = ['IdTenant','Nome','Slug','Status','Plano','DataCadastro','DataUpdate']
       const visKey = `tenants.columns.visible.${(user as any)?.usuario || 'default'}`
@@ -126,14 +117,7 @@ export default function Tenants() {
           <Button type="text" danger onClick={() => {
             setDeleteChoice({ open: true, record })
           }}>DELETAR</Button>
-          <Button type="text" onClick={async () => {
-            try {
-              const res = await api.listTenantParametros(record.IdTenant)
-              const dsnParam = (res.rows || []).find((p: any) => String(p.Chave || p.chave).toUpperCase() === 'DB_DSN')
-              setDsnView(dsnParam ? String(dsnParam.Valor || dsnParam.valor) : '—')
-              setDsnViewOpen(true)
-            } catch { setDsnView('—'); setDsnViewOpen(true) }
-          }}>VER DSN</Button>
+          <Button type="text" onClick={() => { setDsnView(String(record.Dsn || '—')); setDsnViewOpen(true) }}>VER DSN</Button>
           {record.__db__ ? (
             <Button danger onClick={() => {
               modal.confirm({

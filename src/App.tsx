@@ -12,11 +12,12 @@ import Perfil from './pages/Perfil'
 import Funcoes from './pages/Funcoes'
 import Integracoes from './pages/Integracoes'
 import Metas from './pages/Metas'
+import Eleicoes from './pages/Eleicoes'
+import Candidatos from './pages/Candidatos'
 import { lazy, Suspense } from 'react'
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const Estatisticas = lazy(() => import('./pages/Estatisticas'))
 const Tenants = lazy(() => import('./pages/Tenants'))
-const TenantParametros = lazy(() => import('./pages/TenantParametros'))
 import './App.css'
 import { AnimatePresence, motion } from 'framer-motion'
 
@@ -58,11 +59,16 @@ function AppRoutes() {
               <Tenants />
             </Suspense>
           ) : <Navigate to="/" />} />
-          <Route path="/parametros/tenant-parametros" element={isAuthenticated && isAdminTenant ? (
+          <Route path="/parametros/eleicoes" element={isAuthenticated ? (
             <Suspense fallback={<div style={{ padding: 24 }}>Carregando...</div>}>
-              <TenantParametros />
+              <Eleicoes />
             </Suspense>
-          ) : <Navigate to="/" />} />
+          ) : <Navigate to="/login" />} />
+          <Route path="/parametros/candidatos" element={isAuthenticated ? (
+            <Suspense fallback={<div style={{ padding: 24 }}>Carregando...</div>}>
+              <Candidatos />
+            </Suspense>
+          ) : <Navigate to="/login" />} />
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>
       </motion.div>

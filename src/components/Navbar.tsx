@@ -118,11 +118,12 @@ function Navbar() {
         const items = [
           { key: '/parametros/metas', icon: <FileTextOutlined />, label: 'METAS', onClick: () => navigate('/parametros/metas') },
           { key: '/parametros/tenants', icon: <FileTextOutlined />, label: 'TENANTS', onClick: () => navigate('/parametros/tenants') },
-          { key: '/parametros/tenant-parametros', icon: <FileTextOutlined />, label: 'TENANT PARÂMETROS', onClick: () => navigate('/parametros/tenant-parametros') },
+          { key: '/parametros/eleicoes', icon: <FileTextOutlined />, label: 'ELEIÇÕES', onClick: () => navigate('/parametros/eleicoes') },
+          { key: '/parametros/candidatos', icon: <FileTextOutlined />, label: 'CANDIDATOS', onClick: () => navigate('/parametros/candidatos') },
         ]
         const slug = String(tenantSlug || '').toLowerCase()
         if (slug !== 'captar') {
-          return items.filter(i => i.key !== '/parametros/tenants' && i.key !== '/parametros/tenant-parametros')
+          return items.filter(i => i.key !== '/parametros/tenants')
         }
         return items
       })(),

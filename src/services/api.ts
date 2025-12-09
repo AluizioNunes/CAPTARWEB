@@ -431,6 +431,66 @@ class ApiService {
     return data
   }
 
+  async listCandidatos(): Promise<{ rows: any[]; columns: string[] }> {
+    const response = await this.api.get('/candidatos')
+    return response.data
+  }
+
+  async createCandidato(payload: any): Promise<{ id: number }> {
+    const response = await this.api.post('/candidatos', payload)
+    return response.data
+  }
+
+  async updateCandidato(id: number, payload: any): Promise<{ id: number }> {
+    const response = await this.api.put(`/candidatos/${id}`, payload)
+    return response.data
+  }
+
+  async deleteCandidato(id: number): Promise<{ deleted: boolean }> {
+    const response = await this.api.delete(`/candidatos/${id}`)
+    return response.data
+  }
+
+  async listEleicoes(): Promise<{ rows: any[]; columns: string[] }> {
+    const response = await this.api.get('/eleicoes')
+    return response.data
+  }
+
+  async createEleicao(payload: any): Promise<{ id: number }> {
+    const response = await this.api.post('/eleicoes', payload)
+    return response.data
+  }
+
+  async updateEleicao(id: number, payload: any): Promise<{ id: number }> {
+    const response = await this.api.put(`/eleicoes/${id}`, payload)
+    return response.data
+  }
+
+  async deleteEleicao(id: number): Promise<{ deleted: boolean }> {
+    const response = await this.api.delete(`/eleicoes/${id}`)
+    return response.data
+  }
+
+  async listMetas(): Promise<{ rows: any[]; columns: string[] }> {
+    const response = await this.api.get('/metas')
+    return response.data
+  }
+
+  async createMeta(payload: any): Promise<{ id: number }> {
+    const response = await this.api.post('/metas', payload)
+    return response.data
+  }
+
+  async updateMeta(id: number, payload: any): Promise<{ id: number }> {
+    const response = await this.api.put(`/metas/${id}`, payload)
+    return response.data
+  }
+
+  async deleteMeta(id: number): Promise<{ deleted: boolean }> {
+    const response = await this.api.delete(`/metas/${id}`)
+    return response.data
+  }
+
   // ==================== USUÁRIOS ====================
   async getUsuariosSchema(): Promise<{ columns: { name: string; type: string; nullable: boolean; maxLength?: number }[] }> {
     try {
@@ -644,25 +704,6 @@ class ApiService {
     }
   }
 
-  async listTenantParametros(tenantId: number): Promise<{ rows: any[]; columns: string[] }> {
-    const response = await this.api.get(`/tenant-parametros/${tenantId}`)
-    return response.data
-  }
-
-  async createTenantParametro(tenantId: number, payload: any): Promise<{ id: number }> {
-    const response = await this.api.post(`/tenant-parametros/${tenantId}`, payload)
-    return response.data
-  }
-
-  async updateTenantParametro(tenantId: number, id: number, payload: any): Promise<{ id: number }> {
-    const response = await this.api.put(`/tenant-parametros/${tenantId}/${id}`, payload)
-    return response.data
-  }
-
-  async deleteTenantParametro(tenantId: number, id: number): Promise<{ deleted: boolean }> {
-    const response = await this.api.delete(`/tenant-parametros/${tenantId}/${id}`)
-    return response.data
-  }
 
   async provisionTenant(body: { nome: string; slug: string; db_name: string; db_host: string; db_port: string; db_user: string; db_password: string }): Promise<{ ok: boolean; idTenant: number; dsn: string; actions: string[] }> {
     try {

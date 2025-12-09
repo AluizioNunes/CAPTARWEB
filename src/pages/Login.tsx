@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Form, Input, Button, message, Divider, Tag, Space, Modal } from 'antd'
+import { Form, Input, Button, Divider, Tag, Space, Modal, App as AntdApp } from 'antd'
 import { UserOutlined, LockOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/authStore'
@@ -13,6 +13,7 @@ interface LoginFormValues {
 }
 
 export default function Login() {
+  const { message } = AntdApp.useApp()
   const navigate = useNavigate()
   const { login } = useAuthStore()
   const [loading, setLoading] = useState(false)

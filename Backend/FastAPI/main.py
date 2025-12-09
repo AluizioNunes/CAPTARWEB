@@ -89,16 +89,11 @@ def _get_pool(dsn: str) -> any:
 @contextmanager
 def get_db_connection(dsn: str | None = None):
     use_dsn = (dsn.strip() if (dsn and dsn.strip()) else f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
-    pool = _get_pool(use_dsn)
-    if pool:
-        with pool.connection() as conn:
-            yield conn
-    else:
-        conn = psycopg.connect(use_dsn)
-        try:
-            yield conn
-        finally:
-            conn.close()
+    conn = psycopg.connect(use_dsn)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 _DSN_CACHE: Dict[str, Tuple[str, float]] = {}
 _DSN_TTL_SECONDS = 300
@@ -126,31 +121,23 @@ def _get_tenant_dsn(slug: str) -> Optional[str]:
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute(
-                f"SELECT \"Valor\" FROM \"{DB_SCHEMA}\".\"TenantParametros\" WHERE \"Chave\" = %s AND \"IdTenant\" = (SELECT \"IdTenant\" FROM \"{DB_SCHEMA}\".\"Tenant\" WHERE \"Slug\" = %s LIMIT 1) LIMIT 1",
-                ('DB_DSN', slug)
-            )
+            s = str(slug).lower()
+            cur.execute(f'SELECT "IdTenant","Dsn" FROM "{DB_SCHEMA}"."Tenant" WHERE LOWER("Slug")=%s LIMIT 1', (s,))
             row = cur.fetchone()
-            if row and row[0]:
-                dsn = str(row[0])
-                _DSN_CACHE[slug] = (dsn, now + _DSN_TTL_SECONDS)
-                if rc:
-                    try:
-                        from cryptography.fernet import Fernet
-                        key = os.getenv('DSN_SECRET_KEY', '')
-                        enc = Fernet(key.encode()).encrypt(dsn.encode()).decode() if key else dsn
-                        rc.setex(f"tenant:{slug}:dsn", _DSN_TTL_SECONDS, enc)
-                    except Exception:
-                        pass
-                return dsn
-            # Alternativamente, montar DSN por componentes
-            cur.execute(
-                f"SELECT \"Valor\" FROM \"{DB_SCHEMA}\".\"TenantParametros\" WHERE \"Chave\" IN ('DB_HOST','DB_PORT','DB_NAME','DB_USER','DB_PASSWORD') AND \"IdTenant\" = (SELECT \"IdTenant\" FROM \"{DB_SCHEMA}\".\"Tenant\" WHERE \"Slug\" = %s LIMIT 1)",
-                (slug,)
-            )
-            rows = cur.fetchall()
-            if rows and len(rows) >= 5:
-                # Este bloco pressupõe a ordem não garantida; optar por consulta separada por chave em produção
+            if row:
+                idt = int(row[0] or 0)
+                dsn = str(row[1] or '')
+                if dsn:
+                    _DSN_CACHE[slug] = (dsn, now + _DSN_TTL_SECONDS)
+                    if rc:
+                        try:
+                            from cryptography.fernet import Fernet
+                            key = os.getenv('DSN_SECRET_KEY', '')
+                            enc = Fernet(key.encode()).encrypt(dsn.encode()).decode() if key else dsn
+                            rc.setex(f"tenant:{slug}:dsn", _DSN_TTL_SECONDS, enc)
+                        except Exception:
+                            pass
+                    return dsn
                 return None
     except Exception:
         pass
@@ -159,7 +146,9 @@ def _get_tenant_dsn(slug: str) -> Optional[str]:
 
 def get_conn_for_request(request: Request):
     slug = request.headers.get('X-Tenant') or 'captar'
-    dsn = _get_tenant_dsn(slug)
+    if str(slug).lower() == 'captar':
+        return get_db_connection()
+    dsn = _get_dsn_by_slug(str(slug).lower())
     return get_db_connection(dsn)
 
 _redis_client = None
@@ -227,15 +216,10 @@ def _ensure_tenant_slug(slug: str, nome: Optional[str] = None) -> int:
         conn.commit()
         return tid
 
-def _upsert_tenant_param(id_tenant: int, chave: str, valor: str):
+def _set_tenant_dsn(id_tenant: int, dsn: str):
     with get_db_connection() as conn:
         cur = conn.cursor()
-        cur.execute(f'SELECT 1 FROM "{DB_SCHEMA}"."TenantParametros" WHERE "IdTenant"=%s AND "Chave"=%s', (id_tenant, chave))
-        exists = cur.fetchone() is not None
-        if exists:
-            cur.execute(f'UPDATE "{DB_SCHEMA}"."TenantParametros" SET "Valor"=%s, "AtualizadoEm"=NOW() WHERE "IdTenant"=%s AND "Chave"=%s', (valor, id_tenant, chave))
-        else:
-            cur.execute(f'INSERT INTO "{DB_SCHEMA}"."TenantParametros" ("IdTenant","Chave","Valor","Tipo","Descricao") VALUES (%s,%s,%s,%s,%s)', (id_tenant, chave, valor, 'STRING', 'DSN do banco do tenant'))
+        cur.execute(f'UPDATE "{DB_SCHEMA}"."Tenant" SET "Dsn"=%s, "DbCreatedAt"=COALESCE("DbCreatedAt", NOW()), "DataUpdate"=NOW() WHERE "IdTenant"=%s', (dsn, id_tenant))
         conn.commit()
 
 def _seed_pf_funcoes_for_tenant(id_tenant: int):
@@ -277,7 +261,7 @@ async def tenants_set_dsn(slug: str, body: SetDsnRequest):
         tid = _ensure_tenant_slug(slug)
         central_dsn = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
         chosen = body.dsn if str(slug).lower() != 'captar' else central_dsn
-        _upsert_tenant_param(tid, 'DB_DSN', chosen)
+        _set_tenant_dsn(tid, chosen)
         actions = apply_migrations_dsn(chosen, slug)
         _seed_pf_funcoes_for_tenant(tid)
         actions.append('pf_funcoes seeded (central)')
@@ -311,7 +295,7 @@ async def tenants_provision(body: ProvisionTenantRequest):
                     cur.execute(f"CREATE DATABASE \"{body.db_name}\"")
         except Exception:
             pass
-        _upsert_tenant_param(tid, 'DB_DSN', dsn)
+        _set_tenant_dsn(tid, dsn)
         actions = apply_migrations_dsn(dsn, body.slug)
         _seed_pf_funcoes_for_tenant(tid)
         actions.append('pf_funcoes seeded (central)')
@@ -371,6 +355,11 @@ def apply_migrations():
         conn.autocommit = True
         cur = conn.cursor()
         try:
+            cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{DB_SCHEMA}"')
+            actions.append('Schema ensured')
+        except Exception:
+            pass
+        try:
             cur.execute(f'DROP TABLE IF EXISTS {DB_SCHEMA}.usuarios CASCADE')
             actions.append('Dropped legacy table captar.usuarios (lowercase)')
         except Exception:
@@ -429,6 +418,156 @@ def apply_migrations():
                 """
             )
             actions.append('Funcoes created')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Candidatos" (
+                    "IdCandidato" SERIAL PRIMARY KEY,
+                    "Nome" VARCHAR(255) NOT NULL,
+                    "Numero" INT,
+                    "Partido" VARCHAR(120),
+                    "Cargo" VARCHAR(120),
+                    "Foto" TEXT,
+                    "Ativo" BOOLEAN DEFAULT TRUE,
+                    "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                    "DataUpdate" TIMESTAMP,
+                    "TipoUpdate" VARCHAR(20),
+                    "UsuarioUpdate" VARCHAR(100),
+                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                )
+                """
+            )
+            actions.append('Candidatos created')
+        except Exception:
+            pass
+        try:
+            cur.execute(f'CREATE INDEX IF NOT EXISTS ix_candidatos_idtenant ON "{DB_SCHEMA}"."Candidatos"("IdTenant")')
+            actions.append('Candidatos index ensured')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Eleicoes" (
+                    "IdEleicao" SERIAL PRIMARY KEY,
+                    "Nome" VARCHAR(255) NOT NULL,
+                    "Ano" INT,
+                    "Turno" INT,
+                    "Cargo" VARCHAR(120),
+                    "DataInicio" TIMESTAMP,
+                    "DataFim" TIMESTAMP,
+                    "Ativo" BOOLEAN DEFAULT TRUE,
+                    "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                    "DataUpdate" TIMESTAMP,
+                    "TipoUpdate" VARCHAR(20),
+                    "UsuarioUpdate" VARCHAR(100),
+                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                )
+                """
+            )
+            actions.append('Eleicoes created')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.eleitores (
+                    id SERIAL PRIMARY KEY,
+                    nome VARCHAR(255),
+                    cpf VARCHAR(14),
+                    celular VARCHAR(20),
+                    bairro VARCHAR(120),
+                    zona_eleitoral VARCHAR(120),
+                    criado_por INT REFERENCES "{DB_SCHEMA}"."Usuarios"("IdUsuario"),
+                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant"),
+                    "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                    "DataUpdate" TIMESTAMP,
+                    "TipoUpdate" VARCHAR(20),
+                    "UsuarioUpdate" VARCHAR(100)
+                )
+                """
+            )
+            actions.append('eleitores created')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.ativistas (
+                    id SERIAL PRIMARY KEY,
+                    nome VARCHAR(255),
+                    tipo_apoio VARCHAR(120),
+                    criado_por INT REFERENCES "{DB_SCHEMA}"."Usuarios"("IdUsuario"),
+                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant"),
+                    "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                    "DataUpdate" TIMESTAMP,
+                    "TipoUpdate" VARCHAR(20),
+                    "UsuarioUpdate" VARCHAR(100)
+                )
+                """
+            )
+            actions.append('ativistas created')
+        except Exception:
+            pass
+        try:
+            cur.execute(f'CREATE INDEX IF NOT EXISTS ix_eleicoes_idtenant ON "{DB_SCHEMA}"."Eleicoes"("IdTenant")')
+            actions.append('Eleicoes index ensured')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Metas" (
+                    "IdMeta" SERIAL PRIMARY KEY,
+                    "IdCandidato" INT,
+                    "Numero" INT,
+                    "Partido" VARCHAR(120),
+                    "Cargo" VARCHAR(120),
+                    "IdEleicao" INT,
+                    "DataInicio" TIMESTAMP,
+                    "DataFim" TIMESTAMP,
+                    "MetaVotos" INT,
+                    "MetaDisparos" INT,
+                    "MetaAprovacao" INT,
+                    "MetaRejeicao" INT,
+                    "Ativo" BOOLEAN DEFAULT TRUE,
+                    "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                    "DataUpdate" TIMESTAMP,
+                    "TipoUpdate" VARCHAR(20),
+                    "UsuarioUpdate" VARCHAR(100),
+                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                )
+                """
+            )
+            actions.append('Metas created')
+        except Exception:
+            pass
+        try:
+            cur.execute(f'CREATE INDEX IF NOT EXISTS ix_metas_idtenant ON "{DB_SCHEMA}"."Metas"("IdTenant")')
+            actions.append('Metas index ensured')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Candidatos" (
+                    "IdCandidato" SERIAL PRIMARY KEY,
+                    "Nome" VARCHAR(255) NOT NULL,
+                    "Numero" INT,
+                    "Partido" VARCHAR(120),
+                    "Cargo" VARCHAR(120),
+                    "Foto" TEXT,
+                    "Ativo" BOOLEAN DEFAULT TRUE,
+                    "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                    "DataUpdate" TIMESTAMP,
+                    "TipoUpdate" VARCHAR(20),
+                    "UsuarioUpdate" VARCHAR(100)
+                )
+                """
+            )
+            actions.append('Candidatos created')
         except Exception:
             pass
         targets = [
@@ -552,21 +691,39 @@ def apply_migrations():
         except Exception:
             pass
         try:
+            cur.execute(f'ALTER TABLE "{DB_SCHEMA}"."Tenant" ADD COLUMN IF NOT EXISTS "Dsn" TEXT')
+            actions.append('Tenant.Dsn ensured')
+        except Exception:
+            pass
+        try:
+            cur.execute(f'ALTER TABLE "{DB_SCHEMA}"."Tenant" ADD COLUMN IF NOT EXISTS "DbCreatedAt" TIMESTAMP')
+            actions.append('Tenant.DbCreatedAt ensured')
+        except Exception:
+            pass
+        try:
             cur.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."TenantParametros" (
-                    "IdParametro" SERIAL PRIMARY KEY,
-                    "IdTenant" INT NOT NULL REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant") ON DELETE CASCADE,
-                    "Chave" VARCHAR(120) NOT NULL,
-                    "Valor" TEXT,
-                    "Tipo" VARCHAR(40),
-                    "Descricao" VARCHAR(240),
-                    "AtualizadoEm" TIMESTAMP DEFAULT NOW(),
-                    CONSTRAINT uq_param UNIQUE ("IdTenant", "Chave")
-                )
                 """
+                SELECT 1 FROM information_schema.tables 
+                WHERE table_schema = %s AND table_name = 'TenantParametros'
+                """,
+                (DB_SCHEMA,)
             )
-            actions.append('TenantParametros created')
+            exists = cur.fetchone() is not None
+            if exists:
+                cur.execute(
+                    f"""
+                    UPDATE "{DB_SCHEMA}"."Tenant" t
+                    SET "Dsn" = p."Valor"
+                    FROM "{DB_SCHEMA}"."TenantParametros" p
+                    WHERE p."IdTenant" = t."IdTenant" AND p."Chave" = 'DB_DSN' 
+                      AND (t."Dsn" IS NULL OR t."Dsn" = '')
+                    """
+                )
+        except Exception:
+            pass
+        try:
+            cur.execute(f'DROP TABLE IF EXISTS "{DB_SCHEMA}"."TenantParametros" CASCADE')
+            actions.append('TenantParametros dropped')
         except Exception:
             pass
         try:
@@ -777,6 +934,120 @@ def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):
         try:
             cur.execute(
                 f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Candidatos" (
+                    "IdCandidato" SERIAL PRIMARY KEY,
+                    "Nome" VARCHAR(255) NOT NULL,
+                    "Numero" INT,
+                    "Partido" VARCHAR(120),
+                    "Cargo" VARCHAR(120),
+                    "Foto" TEXT,
+                    "Ativo" BOOLEAN DEFAULT TRUE,
+                    "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                    "DataUpdate" TIMESTAMP,
+                    "TipoUpdate" VARCHAR(20),
+                    "UsuarioUpdate" VARCHAR(100),
+                    "IdTenant" INT
+                )
+                """
+            )
+            actions.append('Candidatos ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Eleicoes" (
+                    "IdEleicao" SERIAL PRIMARY KEY,
+                    "Nome" VARCHAR(255) NOT NULL,
+                    "Ano" INT,
+                    "Turno" INT,
+                    "Cargo" VARCHAR(120),
+                    "DataInicio" TIMESTAMP,
+                    "DataFim" TIMESTAMP,
+                    "Ativo" BOOLEAN DEFAULT TRUE,
+                    "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                    "DataUpdate" TIMESTAMP,
+                    "TipoUpdate" VARCHAR(20),
+                    "UsuarioUpdate" VARCHAR(100),
+                    "IdTenant" INT
+                )
+                """
+            )
+            actions.append('Eleicoes ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Metas" (
+                    "IdMeta" SERIAL PRIMARY KEY,
+                    "IdCandidato" INT,
+                    "Numero" INT,
+                    "Partido" VARCHAR(120),
+                    "Cargo" VARCHAR(120),
+                    "IdEleicao" INT,
+                    "DataInicio" TIMESTAMP,
+                    "DataFim" TIMESTAMP,
+                    "MetaVotos" INT,
+                    "MetaDisparos" INT,
+                    "MetaAprovacao" INT,
+                    "MetaRejeicao" INT,
+                    "Ativo" BOOLEAN DEFAULT TRUE,
+                    "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                    "DataUpdate" TIMESTAMP,
+                    "TipoUpdate" VARCHAR(20),
+                    "UsuarioUpdate" VARCHAR(100),
+                    "IdTenant" INT
+                )
+                """
+            )
+            actions.append('Metas ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.eleitores (
+                    id SERIAL PRIMARY KEY,
+                    nome VARCHAR(255),
+                    cpf VARCHAR(14),
+                    celular VARCHAR(20),
+                    bairro VARCHAR(120),
+                    zona_eleitoral VARCHAR(120),
+                    criado_por INT,
+                    "IdTenant" INT,
+                    "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                    "DataUpdate" TIMESTAMP,
+                    "TipoUpdate" VARCHAR(20),
+                    "UsuarioUpdate" VARCHAR(100)
+                )
+                """
+            )
+            actions.append('eleitores ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.ativistas (
+                    id SERIAL PRIMARY KEY,
+                    nome VARCHAR(255),
+                    tipo_apoio VARCHAR(120),
+                    criado_por INT,
+                    "IdTenant" INT,
+                    "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                    "DataUpdate" TIMESTAMP,
+                    "TipoUpdate" VARCHAR(20),
+                    "UsuarioUpdate" VARCHAR(100)
+                )
+                """
+            )
+            actions.append('ativistas ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
                 CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Perfil" (
                     "IdPerfil" SERIAL PRIMARY KEY,
                     "Perfil" VARCHAR(120),
@@ -980,18 +1251,75 @@ async def admin_migrate():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/admin/ensure_eleitores_ativistas")
+async def admin_ensure_eleitores_ativistas():
+    try:
+        with get_db_connection() as conn:
+            conn.autocommit = True
+            cur = conn.cursor()
+            try:
+                cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{DB_SCHEMA}"')
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.eleitores (
+                        id SERIAL PRIMARY KEY,
+                        nome VARCHAR(255),
+                        cpf VARCHAR(14),
+                        celular VARCHAR(20),
+                        bairro VARCHAR(120),
+                        zona_eleitoral VARCHAR(120),
+                        criado_por INT REFERENCES "{DB_SCHEMA}"."Usuarios"("IdUsuario"),
+                        "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant"),
+                        "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                        "DataUpdate" TIMESTAMP,
+                        "TipoUpdate" VARCHAR(20),
+                        "UsuarioUpdate" VARCHAR(100)
+                    )
+                    """
+                )
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.ativistas (
+                        id SERIAL PRIMARY KEY,
+                        nome VARCHAR(255),
+                        tipo_apoio VARCHAR(120),
+                        criado_por INT REFERENCES "{DB_SCHEMA}"."Usuarios"("IdUsuario"),
+                        "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant"),
+                        "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                        "DataUpdate" TIMESTAMP,
+                        "TipoUpdate" VARCHAR(20),
+                        "UsuarioUpdate" VARCHAR(100)
+                    )
+                    """
+                )
+            except Exception:
+                pass
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/admin/migrate_all_tenants")
 async def admin_migrate_all_tenants():
     try:
         results = []
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute(f'SELECT t."Slug", p."Valor" FROM "{DB_SCHEMA}"."Tenant" t JOIN "{DB_SCHEMA}"."TenantParametros" p ON p."IdTenant" = t."IdTenant" AND p."Chave" = %s', ('DB_DSN',))
+            cur.execute(f'SELECT t."Slug", t."Dsn", t."IdTenant" FROM "{DB_SCHEMA}"."Tenant" t')
             rows = cur.fetchall()
-        for slug, dsn in rows:
-            if dsn:
-                actions = apply_migrations_dsn(str(dsn), str(slug))
-                results.append({"slug": slug, "actions": actions})
+        for slug, dsn, idt in rows:
+            slug_s = str(slug or '')
+            idn = int(idt or 0)
+            dsn_s = str(dsn or '')
+            if not dsn_s:
+                dsn_s = _ensure_tenant_database(slug_s, idn)
+            actions = apply_migrations_dsn(dsn_s, slug_s)
+            results.append({"slug": slug_s, "actions": actions})
         return {"ok": True, "results": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1381,10 +1709,7 @@ async def usuarios_list(limit: int = 200, request: Request = None):
             except Exception:
                 pass
             # tenants via DSN
-            cur_c.execute(
-                f'SELECT t."Slug", t."Nome", p."Valor" FROM "{DB_SCHEMA}"."Tenant" t LEFT JOIN "{DB_SCHEMA}"."TenantParametros" p ON p."IdTenant" = t."IdTenant" AND p."Chave" = %s',
-                ('DB_DSN',)
-            )
+            cur_c.execute(f'SELECT t."Slug", t."Nome", t."Dsn" FROM "{DB_SCHEMA}"."Tenant" t WHERE t."Dsn" IS NOT NULL')
             tenants = cur_c.fetchall()
         for slug_row, nome_row, dsn_row in tenants:
             try:
@@ -1785,9 +2110,11 @@ def _get_dsn_by_slug(slug: str):
             if not row:
                 return None
             idt = int(row[0])
-            cur.execute(f'SELECT p."Valor" FROM "{DB_SCHEMA}"."TenantParametros" p WHERE p."IdTenant"=%s AND p."Chave"=%s LIMIT 1', (idt, 'DB_DSN'))
+            cur.execute(f'SELECT "Dsn" FROM "{DB_SCHEMA}"."Tenant" WHERE "IdTenant"=%s LIMIT 1', (idt,))
             r2 = cur.fetchone()
-            return str(r2[0]) if r2 and r2[0] else None
+            if r2 and r2[0]:
+                return str(r2[0])
+            return None
     except Exception:
         return None
 def _aggregate_table_all_tenants(table: str, limit: int = 500):
@@ -2317,11 +2644,14 @@ async def dashboard_stats(request: Request = None):
             s = str(slug or '').lower()
 
             if s != 'captar':
-                cursor.execute(
-                    f"SELECT COUNT(*) FROM {DB_SCHEMA}.eleitores e JOIN \"{DB_SCHEMA}\".\"Usuarios\" u ON e.criado_por = u.\"IdUsuario\" WHERE u.\"IdTenant\" = %s",
-                    (tid,)
-                )
-                total_eleitores = cursor.fetchone()[0]
+                try:
+                    cursor.execute(
+                        f"SELECT COUNT(*) FROM {DB_SCHEMA}.eleitores e JOIN \"{DB_SCHEMA}\".\"Usuarios\" u ON e.criado_por = u.\"IdUsuario\" WHERE u.\"IdTenant\" = %s",
+                        (tid,)
+                    )
+                    total_eleitores = cursor.fetchone()[0]
+                except Exception:
+                    total_eleitores = 0
                 try:
                     cursor.execute(
                         f"SELECT COUNT(*) FROM {DB_SCHEMA}.ativistas a JOIN \"{DB_SCHEMA}\".\"Usuarios\" u ON a.criado_por = u.\"IdUsuario\" WHERE u.\"IdTenant\" = %s",
@@ -2350,8 +2680,11 @@ async def dashboard_stats(request: Request = None):
                 except Exception:
                     ativistas_por_funcao_rows = []
             else:
-                cursor.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.eleitores")
-                total_eleitores = cursor.fetchone()[0]
+                try:
+                    cursor.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.eleitores")
+                    total_eleitores = cursor.fetchone()[0]
+                except Exception:
+                    total_eleitores = 0
                 try:
                     cursor.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.ativistas")
                     total_ativistas = cursor.fetchone()[0]
@@ -2359,10 +2692,13 @@ async def dashboard_stats(request: Request = None):
                     total_ativistas = 0
                 cursor.execute(f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Usuarios\"")
                 total_usuarios = cursor.fetchone()[0]
-                cursor.execute(
-                    f"SELECT COALESCE(zona_eleitoral, 'N/D') AS zona, COUNT(*) AS qtd FROM {DB_SCHEMA}.eleitores GROUP BY zona_eleitoral ORDER BY qtd DESC LIMIT 20"
-                )
-                zonas_rows = cursor.fetchall()
+                try:
+                    cursor.execute(
+                        f"SELECT COALESCE(zona_eleitoral, 'N/D') AS zona, COUNT(*) AS qtd FROM {DB_SCHEMA}.eleitores GROUP BY zona_eleitoral ORDER BY qtd DESC LIMIT 20"
+                    )
+                    zonas_rows = cursor.fetchall()
+                except Exception:
+                    zonas_rows = []
                 try:
                     cursor.execute(
                         f"SELECT COALESCE(tipo_apoio, 'N/D') AS funcao, COUNT(*) AS qtd FROM {DB_SCHEMA}.ativistas GROUP BY tipo_apoio ORDER BY qtd DESC LIMIT 20"
@@ -2547,11 +2883,7 @@ async def tenants_create(payload: dict):
             except Exception:
                 pass
             try:
-                _upsert_tenant_param(new_id, 'DB_DSN', dsn)
-            except Exception:
-                pass
-            try:
-                _upsert_tenant_param(new_id, 'DB_CREATED_AT', datetime.now().isoformat())
+                _set_tenant_dsn(new_id, dsn)
             except Exception:
                 pass
             # Aplicar migrações no DB do tenant e inserir ADMIN
@@ -2587,9 +2919,8 @@ async def tenants_recreate_db(slug: str):
                 pass
             cur.execute(f'CREATE DATABASE "{db_name}"')
             dsn = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{db_name}"
-            _upsert_tenant_param(id_tenant, 'DB_DSN', dsn)
+            _set_tenant_dsn(id_tenant, dsn)
             actions = apply_migrations_dsn(dsn, s)
-            _upsert_tenant_param(id_tenant, 'DB_CREATED_AT', datetime.now().isoformat())
             return {"ok": True, "idTenant": id_tenant, "dsn": dsn, "actions": actions}
     except HTTPException:
         raise
@@ -2629,10 +2960,6 @@ async def tenants_delete_all(slug: str):
                 pass
             try:
                 cur.execute(f'DELETE FROM "{DB_SCHEMA}"."Funcoes" WHERE "IdTenant"=%s', (id_tenant,))
-            except Exception:
-                pass
-            try:
-                cur.execute(f'DELETE FROM "{DB_SCHEMA}"."TenantParametros" WHERE "IdTenant"=%s', (id_tenant,))
             except Exception:
                 pass
             cur.execute(f'DELETE FROM "{DB_SCHEMA}"."Tenant" WHERE "IdTenant"=%s', (id_tenant,))
@@ -2702,88 +3029,7 @@ async def tenants_delete(id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==================== TENANT PARÂMETROS ====================
-
-@app.get("/api/tenant-parametros/{tenantId}")
-async def tenant_params_list(tenantId: int, limit: int = 500):
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                f"SELECT * FROM \"{DB_SCHEMA}\".\"TenantParametros\" WHERE \"IdTenant\" = %s ORDER BY \"IdParametro\" DESC LIMIT %s",
-                (tenantId, limit)
-            )
-            colnames = [desc[0] for desc in cursor.description]
-            rows = cursor.fetchall()
-            data = [dict(zip(colnames, row)) for row in rows]
-            return {"rows": data, "columns": colnames}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/tenant-parametros/{tenantId}")
-async def tenant_params_create(tenantId: int, payload: dict):
-    try:
-        cols_meta = get_table_columns("TenantParametros")
-        allowed = {c["name"] for c in cols_meta if c["name"] != "IdParametro"}
-        data = {k: v for k, v in payload.items() if k in allowed}
-        data["IdTenant"] = tenantId
-        keys = list(data.keys())
-        if not keys:
-            raise HTTPException(status_code=400, detail="Nenhum campo válido para inserir")
-        values = [data[k] for k in keys]
-        placeholders = ", ".join(["%s"] * len(values))
-        columns_sql = ", ".join([f'"{k}"' for k in keys])
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                f"INSERT INTO \"{DB_SCHEMA}\".\"TenantParametros\" ({columns_sql}) VALUES ({placeholders}) RETURNING \"IdParametro\"",
-                tuple(values)
-            )
-            new_id = cursor.fetchone()[0]
-            conn.commit()
-            return {"id": new_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.put("/api/tenant-parametros/{tenantId}/{id}")
-async def tenant_params_update(tenantId: int, id: int, payload: dict):
-    try:
-        cols_meta = get_table_columns("TenantParametros")
-        allowed = {c["name"] for c in cols_meta if c["name"] != "IdParametro"}
-        data = {k: v for k, v in payload.items() if k in allowed}
-        keys = list(data.keys())
-        if not keys:
-            raise HTTPException(status_code=400, detail="Nenhum campo válido para atualizar")
-        set_parts = ", ".join([f'"{k}"=%s' for k in keys])
-        values = [data[k] for k in keys]
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                f"UPDATE \"{DB_SCHEMA}\".\"TenantParametros\" SET {set_parts} WHERE \"IdParametro\" = %s AND \"IdTenant\" = %s",
-                tuple(values + [id, tenantId])
-            )
-            conn.commit()
-            return {"id": id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/api/tenant-parametros/{tenantId}/{id}")
-async def tenant_params_delete(tenantId: int, id: int):
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                f"DELETE FROM \"{DB_SCHEMA}\".\"TenantParametros\" WHERE \"IdParametro\" = %s AND \"IdTenant\" = %s",
-                (id, tenantId)
-            )
-            conn.commit()
-            return {"deleted": True}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# Tenant parâmetros removidos
 
 @app.get("/api/dashboard/top-usuarios")
 async def dashboard_top_usuarios(request: Request = None):
@@ -3348,16 +3594,38 @@ def _list_tenants_with_dsn():
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute(
-                f'SELECT t."Slug", t."Nome", p."Valor" FROM "{DB_SCHEMA}"."Tenant" t LEFT JOIN "{DB_SCHEMA}"."TenantParametros" p ON p."IdTenant" = t."IdTenant" AND p."Chave" = %s',
-                ('DB_DSN',)
-            )
+            cur.execute(f'SELECT t."Slug", t."Nome", t."Dsn" FROM "{DB_SCHEMA}"."Tenant" t WHERE t."Dsn" IS NOT NULL AND t."Dsn" <> ''')
             rows = cur.fetchall()
             for r in rows:
-                out.append((str(r[0] or ''), str(r[1] or ''), str(r[2] or '')))
+                slug = str(r[0] or '')
+                nome = str(r[1] or '')
+                dsn = str(r[2] or '')
+                if dsn:
+                    out.append((slug, nome, dsn))
     except Exception:
         pass
     return out
+
+def _ensure_tenant_database(slug: str, idtenant: int) -> str:
+    host = os.getenv('DB_HOST', 'postgres')
+    port = os.getenv('DB_PORT', '5432')
+    user = os.getenv('DB_USER', 'captar')
+    pwd = os.getenv('DB_PASSWORD', 'captar')
+    s = str(slug or '').lower()
+    dbname = f"captar_t{str(int(idtenant or 0)).zfill(2)}_{s}"
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute('SELECT 1 FROM pg_database WHERE datname = %s', (dbname,))
+            ok = cur.fetchone() is not None
+            if not ok:
+                try:
+                    cur.execute(f'CREATE DATABASE "{dbname}"')
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return f"postgresql://{user}:{pwd}@{host}:{port}/{dbname}"
 @app.get("/api/eleitores")
 async def eleitores_list(limit: int = 500, request: Request = None):
     try:
@@ -3483,5 +3751,1094 @@ async def ativistas_list(limit: int = 500, request: Request = None):
                     pass
         rows, cols = _aggregate_table_all_tenants('ativistas', limit)
         return {"rows": rows, "columns": cols}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/candidatos")
+async def candidatos_list(limit: int = 200, request: Request = None):
+    try:
+        s = (request and request.headers.get('X-Tenant') or 'captar').lower()
+        view = (request and request.headers.get('X-View-Tenant') or '').lower()
+        if s != 'captar':
+            dsn_self = _get_dsn_by_slug(s)
+            if not dsn_self:
+                return {"rows": [], "columns": []}
+            with get_db_connection(dsn_self) as conn:
+                cur = conn.cursor()
+                try:
+                    cur.execute(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Candidatos" (
+                            "IdCandidato" SERIAL PRIMARY KEY,
+                            "Nome" VARCHAR(255) NOT NULL,
+                            "Numero" INT,
+                            "Partido" VARCHAR(120),
+                            "Cargo" VARCHAR(120),
+                            "Foto" TEXT,
+                            "Ativo" BOOLEAN DEFAULT TRUE,
+                            "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                            "DataUpdate" TIMESTAMP,
+                            "TipoUpdate" VARCHAR(20),
+                            "UsuarioUpdate" VARCHAR(100),
+                            "IdTenant" INT
+                        )
+                        """
+                    )
+                except Exception:
+                    pass
+                cur.execute(f'SELECT c.* FROM "{DB_SCHEMA}"."Candidatos" c ORDER BY 1 ASC LIMIT %s', (limit,))
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                tn = _tenant_name_from_header(request)
+                data = [dict(zip(cols, r)) for r in rows]
+                for d in data:
+                    d['TenantLayer'] = tn
+                if 'TenantLayer' not in cols:
+                    cols.append('TenantLayer')
+                return {"rows": data, "columns": cols}
+        # CAPTAR
+        if view:
+            if view == 'captar':
+                with get_db_connection() as conn:
+                    cur = conn.cursor()
+                    try:
+                        cur.execute(
+                            f"""
+                            CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Candidatos" (
+                                "IdCandidato" SERIAL PRIMARY KEY,
+                                "Nome" VARCHAR(255) NOT NULL,
+                                "Numero" INT,
+                                "Partido" VARCHAR(120),
+                                "Cargo" VARCHAR(120),
+                                "Foto" TEXT,
+                                "Ativo" BOOLEAN DEFAULT TRUE,
+                                "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                                "DataUpdate" TIMESTAMP,
+                                "TipoUpdate" VARCHAR(20),
+                                "UsuarioUpdate" VARCHAR(100),
+                                "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                            )
+                            """
+                        )
+                    except Exception:
+                        pass
+                    cur.execute(f'SELECT c.* FROM "{DB_SCHEMA}"."Candidatos" c ORDER BY 1 ASC LIMIT %s', (limit,))
+                    cols = [d[0] for d in cur.description]
+                    rows = cur.fetchall()
+                    data = [dict(zip(cols, r)) for r in rows]
+                    for d in data:
+                        d['TenantLayer'] = 'CAPTAR'
+                    if 'TenantLayer' not in cols:
+                        cols.append('TenantLayer')
+                    return {"rows": data, "columns": cols}
+            dsn = _get_dsn_by_slug(view)
+            if dsn:
+                with get_db_connection(dsn) as conn:
+                    cur = conn.cursor()
+                    try:
+                        cur.execute(
+                            f"""
+                            CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Candidatos" (
+                                "IdCandidato" SERIAL PRIMARY KEY,
+                                "Nome" VARCHAR(255) NOT NULL,
+                                "Numero" INT,
+                                "Partido" VARCHAR(120),
+                                "Cargo" VARCHAR(120),
+                                "Foto" TEXT,
+                                "Ativo" BOOLEAN DEFAULT TRUE,
+                                "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                                "DataUpdate" TIMESTAMP,
+                                "TipoUpdate" VARCHAR(20),
+                                "UsuarioUpdate" VARCHAR(100),
+                                "IdTenant" INT
+                            )
+                            """
+                        )
+                    except Exception:
+                        pass
+                    cur.execute(f'SELECT c.* FROM "{DB_SCHEMA}"."Candidatos" c ORDER BY 1 ASC LIMIT %s', (limit,))
+                    cols = [d[0] for d in cur.description]
+                    rows = cur.fetchall()
+                    data = [dict(zip(cols, r)) for r in rows]
+                    name = view.upper()
+                    for d in data:
+                        d['TenantLayer'] = name
+                    if 'TenantLayer' not in cols:
+                        cols.append('TenantLayer')
+                    return {"rows": data, "columns": cols}
+        union_cols = set()
+        out_rows = []
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Candidatos" (
+                        "IdCandidato" SERIAL PRIMARY KEY,
+                        "Nome" VARCHAR(255) NOT NULL,
+                        "Numero" INT,
+                        "Partido" VARCHAR(120),
+                        "Cargo" VARCHAR(120),
+                        "Foto" TEXT,
+                        "Ativo" BOOLEAN DEFAULT TRUE,
+                        "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                        "DataUpdate" TIMESTAMP,
+                        "TipoUpdate" VARCHAR(20),
+                        "UsuarioUpdate" VARCHAR(100),
+                        "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                    )
+                    """
+                )
+            except Exception:
+                pass
+            cur.execute(f'SELECT c.* FROM "{DB_SCHEMA}"."Candidatos" c ORDER BY 1 ASC LIMIT %s', (limit,))
+            cols_c = [d[0] for d in cur.description]
+            union_cols.update(cols_c)
+            rows_c = cur.fetchall()
+            for r in rows_c:
+                d = dict(zip(cols_c, r))
+                d['TenantLayer'] = 'CAPTAR'
+                out_rows.append(d)
+        for slug_row, nome_row, dsn_row in _list_tenants_with_dsn():
+            if not dsn_row:
+                continue
+            with get_db_connection(dsn_row) as conn:
+                cur = conn.cursor()
+                cur.execute(f'SELECT c.* FROM "{DB_SCHEMA}"."Candidatos" c ORDER BY 1 ASC LIMIT %s', (limit,))
+                cols_t = [d[0] for d in cur.description]
+                union_cols.update(cols_t)
+                rows_t = cur.fetchall()
+                for r in rows_t:
+                    d = dict(zip(cols_t, r))
+                    d['TenantLayer'] = (nome_row or slug_row or '').upper() or 'TENANT'
+                    out_rows.append(d)
+        union_cols.add('TenantLayer')
+        all_cols = list(union_cols)
+        for r in out_rows:
+            for c in all_cols:
+                if c not in r:
+                    r[c] = None
+        return {"rows": out_rows, "columns": all_cols}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/eleicoes")
+async def eleicoes_list(limit: int = 200, request: Request = None):
+    try:
+        s = (request and request.headers.get('X-Tenant') or 'captar').lower()
+        view = (request and request.headers.get('X-View-Tenant') or '').lower()
+        if s != 'captar':
+            dsn_self = _get_dsn_by_slug(s)
+            if not dsn_self:
+                return {"rows": [], "columns": []}
+            with get_db_connection(dsn_self) as conn:
+                cur = conn.cursor()
+                try:
+                    cur.execute(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Eleicoes" (
+                            "IdEleicao" SERIAL PRIMARY KEY,
+                            "Nome" VARCHAR(255) NOT NULL,
+                            "Ano" INT,
+                            "Turno" INT,
+                            "Cargo" VARCHAR(120),
+                            "DataInicio" TIMESTAMP,
+                            "DataFim" TIMESTAMP,
+                            "Ativo" BOOLEAN DEFAULT TRUE,
+                            "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                            "DataUpdate" TIMESTAMP,
+                            "TipoUpdate" VARCHAR(20),
+                            "UsuarioUpdate" VARCHAR(100),
+                            "IdTenant" INT
+                        )
+                        """
+                    )
+                except Exception:
+                    pass
+                cur.execute(f'SELECT e.* FROM "{DB_SCHEMA}"."Eleicoes" e ORDER BY 1 ASC LIMIT %s', (limit,))
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                tn = _tenant_name_from_header(request)
+                data = [dict(zip(cols, r)) for r in rows]
+                for d in data:
+                    d['TenantLayer'] = tn
+                if 'TenantLayer' not in cols:
+                    cols.append('TenantLayer')
+                return {"rows": data, "columns": cols}
+        if view:
+            if view == 'captar':
+                with get_db_connection() as conn:
+                    cur = conn.cursor()
+                    try:
+                        cur.execute(
+                            f"""
+                            CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Eleicoes" (
+                                "IdEleicao" SERIAL PRIMARY KEY,
+                                "Nome" VARCHAR(255) NOT NULL,
+                                "Ano" INT,
+                                "Turno" INT,
+                                "Cargo" VARCHAR(120),
+                                "DataInicio" TIMESTAMP,
+                                "DataFim" TIMESTAMP,
+                                "Ativo" BOOLEAN DEFAULT TRUE,
+                                "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                                "DataUpdate" TIMESTAMP,
+                                "TipoUpdate" VARCHAR(20),
+                                "UsuarioUpdate" VARCHAR(100),
+                                "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                            )
+                            """
+                        )
+                    except Exception:
+                        pass
+                    cur.execute(f'SELECT e.* FROM "{DB_SCHEMA}"."Eleicoes" e ORDER BY 1 ASC LIMIT %s', (limit,))
+                    cols = [d[0] for d in cur.description]
+                    rows = cur.fetchall()
+                    data = [dict(zip(cols, r)) for r in rows]
+                    for d in data:
+                        d['TenantLayer'] = 'CAPTAR'
+                    if 'TenantLayer' not in cols:
+                        cols.append('TenantLayer')
+                    return {"rows": data, "columns": cols}
+            dsn = _get_dsn_by_slug(view)
+            if dsn:
+                with get_db_connection(dsn) as conn:
+                    cur = conn.cursor()
+                    try:
+                        cur.execute(
+                            f"""
+                            CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Eleicoes" (
+                                "IdEleicao" SERIAL PRIMARY KEY,
+                                "Nome" VARCHAR(255) NOT NULL,
+                                "Ano" INT,
+                                "Turno" INT,
+                                "Cargo" VARCHAR(120),
+                                "DataInicio" TIMESTAMP,
+                                "DataFim" TIMESTAMP,
+                                "Ativo" BOOLEAN DEFAULT TRUE,
+                                "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                                "DataUpdate" TIMESTAMP,
+                                "TipoUpdate" VARCHAR(20),
+                                "UsuarioUpdate" VARCHAR(100),
+                                "IdTenant" INT
+                            )
+                            """
+                        )
+                    except Exception:
+                        pass
+                    cur.execute(f'SELECT e.* FROM "{DB_SCHEMA}"."Eleicoes" e ORDER BY 1 ASC LIMIT %s', (limit,))
+                    cols = [d[0] for d in cur.description]
+                    rows = cur.fetchall()
+                    data = [dict(zip(cols, r)) for r in rows]
+                    name = view.upper()
+                    for d in data:
+                        d['TenantLayer'] = name
+                    if 'TenantLayer' not in cols:
+                        cols.append('TenantLayer')
+                    return {"rows": data, "columns": cols}
+        union_cols = set()
+        out_rows = []
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Eleicoes" (
+                        "IdEleicao" SERIAL PRIMARY KEY,
+                        "Nome" VARCHAR(255) NOT NULL,
+                        "Ano" INT,
+                        "Turno" INT,
+                        "Cargo" VARCHAR(120),
+                        "DataInicio" TIMESTAMP,
+                        "DataFim" TIMESTAMP,
+                        "Ativo" BOOLEAN DEFAULT TRUE,
+                        "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                        "DataUpdate" TIMESTAMP,
+                        "TipoUpdate" VARCHAR(20),
+                        "UsuarioUpdate" VARCHAR(100),
+                        "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                    )
+                    """
+                )
+            except Exception:
+                pass
+            cur.execute(f'SELECT e.* FROM "{DB_SCHEMA}"."Eleicoes" e ORDER BY 1 ASC LIMIT %s', (limit,))
+            cols_c = [d[0] for d in cur.description]
+            union_cols.update(cols_c)
+            rows_c = cur.fetchall()
+            for r in rows_c:
+                d = dict(zip(cols_c, r))
+                d['TenantLayer'] = 'CAPTAR'
+                out_rows.append(d)
+        for slug_row, nome_row, dsn_row in _list_tenants_with_dsn():
+            if not dsn_row:
+                continue
+            with get_db_connection(dsn_row) as conn:
+                cur = conn.cursor()
+                try:
+                    cur.execute(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Eleicoes" (
+                            "IdEleicao" SERIAL PRIMARY KEY,
+                            "Nome" VARCHAR(255) NOT NULL,
+                            "Ano" INT,
+                            "Turno" INT,
+                            "Cargo" VARCHAR(120),
+                            "DataInicio" TIMESTAMP,
+                            "DataFim" TIMESTAMP,
+                            "Ativo" BOOLEAN DEFAULT TRUE,
+                            "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                            "DataUpdate" TIMESTAMP,
+                            "TipoUpdate" VARCHAR(20),
+                            "UsuarioUpdate" VARCHAR(100),
+                            "IdTenant" INT
+                        )
+                        """
+                    )
+                except Exception:
+                    pass
+                cur.execute(f'SELECT e.* FROM "{DB_SCHEMA}"."Eleicoes" e ORDER BY 1 ASC LIMIT %s', (limit,))
+                cols_t = [d[0] for d in cur.description]
+                union_cols.update(cols_t)
+                rows_t = cur.fetchall()
+                for r in rows_t:
+                    d = dict(zip(cols_t, r))
+                    d['TenantLayer'] = (nome_row or slug_row or '').upper() or 'TENANT'
+                    out_rows.append(d)
+        union_cols.add('TenantLayer')
+        all_cols = list(union_cols)
+        for r in out_rows:
+            for c in all_cols:
+                if c not in r:
+                    r[c] = None
+        return {"rows": out_rows, "columns": all_cols}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/metas")
+async def metas_list(limit: int = 200, request: Request = None):
+    try:
+        s = (request and request.headers.get('X-Tenant') or 'captar').lower()
+        view = (request and request.headers.get('X-View-Tenant') or '').lower()
+        if s != 'captar':
+            dsn_self = _get_dsn_by_slug(s)
+            if not dsn_self:
+                return {"rows": [], "columns": []}
+            with get_db_connection(dsn_self) as conn:
+                cur = conn.cursor()
+                try:
+                    cur.execute(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Metas" (
+                            "IdMeta" SERIAL PRIMARY KEY,
+                            "IdCandidato" INT,
+                            "Numero" INT,
+                            "Partido" VARCHAR(120),
+                            "Cargo" VARCHAR(120),
+                            "IdEleicao" INT,
+                            "DataInicio" TIMESTAMP,
+                            "DataFim" TIMESTAMP,
+                            "MetaVotos" INT,
+                            "MetaDisparos" INT,
+                            "MetaAprovacao" INT,
+                            "MetaRejeicao" INT,
+                            "Ativo" BOOLEAN DEFAULT TRUE,
+                            "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                            "DataUpdate" TIMESTAMP,
+                            "TipoUpdate" VARCHAR(20),
+                            "UsuarioUpdate" VARCHAR(100),
+                            "IdTenant" INT
+                        )
+                        """
+                    )
+                except Exception:
+                    pass
+                cur.execute(f'SELECT m.* FROM "{DB_SCHEMA}"."Metas" m ORDER BY 1 ASC LIMIT %s', (limit,))
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                tn = _tenant_name_from_header(request)
+                data = [dict(zip(cols, r)) for r in rows]
+                for d in data:
+                    d['TenantLayer'] = tn
+                if 'TenantLayer' not in cols:
+                    cols.append('TenantLayer')
+                return {"rows": data, "columns": cols}
+        if view:
+            if view == 'captar':
+                with get_db_connection() as conn:
+                    cur = conn.cursor()
+                    try:
+                        cur.execute(
+                            f"""
+                            CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Metas" (
+                                "IdMeta" SERIAL PRIMARY KEY,
+                                "IdCandidato" INT,
+                                "Numero" INT,
+                                "Partido" VARCHAR(120),
+                                "Cargo" VARCHAR(120),
+                                "IdEleicao" INT,
+                                "DataInicio" TIMESTAMP,
+                                "DataFim" TIMESTAMP,
+                                "MetaVotos" INT,
+                                "MetaDisparos" INT,
+                                "MetaAprovacao" INT,
+                                "MetaRejeicao" INT,
+                                "Ativo" BOOLEAN DEFAULT TRUE,
+                                "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                                "DataUpdate" TIMESTAMP,
+                                "TipoUpdate" VARCHAR(20),
+                                "UsuarioUpdate" VARCHAR(100),
+                                "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                            )
+                            """
+                        )
+                    except Exception:
+                        pass
+                    cur.execute(f'SELECT m.* FROM "{DB_SCHEMA}"."Metas" m ORDER BY 1 ASC LIMIT %s', (limit,))
+                    cols = [d[0] for d in cur.description]
+                    rows = cur.fetchall()
+                    data = [dict(zip(cols, r)) for r in rows]
+                    for d in data:
+                        d['TenantLayer'] = 'CAPTAR'
+                    if 'TenantLayer' not in cols:
+                        cols.append('TenantLayer')
+                    return {"rows": data, "columns": cols}
+            dsn = _get_dsn_by_slug(view)
+            if dsn:
+                with get_db_connection(dsn) as conn:
+                    cur = conn.cursor()
+                    try:
+                        cur.execute(
+                            f"""
+                            CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Metas" (
+                                "IdMeta" SERIAL PRIMARY KEY,
+                                "IdCandidato" INT,
+                                "Numero" INT,
+                                "Partido" VARCHAR(120),
+                                "Cargo" VARCHAR(120),
+                                "IdEleicao" INT,
+                                "DataInicio" TIMESTAMP,
+                                "DataFim" TIMESTAMP,
+                                "MetaVotos" INT,
+                                "MetaDisparos" INT,
+                                "MetaAprovacao" INT,
+                                "MetaRejeicao" INT,
+                                "Ativo" BOOLEAN DEFAULT TRUE,
+                                "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                                "DataUpdate" TIMESTAMP,
+                                "TipoUpdate" VARCHAR(20),
+                                "UsuarioUpdate" VARCHAR(100),
+                                "IdTenant" INT
+                            )
+                            """
+                        )
+                    except Exception:
+                        pass
+                    cur.execute(f'SELECT m.* FROM "{DB_SCHEMA}"."Metas" m ORDER BY 1 ASC LIMIT %s', (limit,))
+                    cols = [d[0] for d in cur.description]
+                    rows = cur.fetchall()
+                    data = [dict(zip(cols, r)) for r in rows]
+                    name = view.upper()
+                    for d in data:
+                        d['TenantLayer'] = name
+                    if 'TenantLayer' not in cols:
+                        cols.append('TenantLayer')
+                    return {"rows": data, "columns": cols}
+        union_cols = set()
+        out_rows = []
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Metas" (
+                        "IdMeta" SERIAL PRIMARY KEY,
+                        "IdCandidato" INT,
+                        "Numero" INT,
+                        "Partido" VARCHAR(120),
+                        "Cargo" VARCHAR(120),
+                        "IdEleicao" INT,
+                        "DataInicio" TIMESTAMP,
+                        "DataFim" TIMESTAMP,
+                        "MetaVotos" INT,
+                        "MetaDisparos" INT,
+                        "MetaAprovacao" INT,
+                        "MetaRejeicao" INT,
+                        "Ativo" BOOLEAN DEFAULT TRUE,
+                        "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                        "DataUpdate" TIMESTAMP,
+                        "TipoUpdate" VARCHAR(20),
+                        "UsuarioUpdate" VARCHAR(100),
+                        "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                    )
+                    """
+                )
+            except Exception:
+                pass
+            cur.execute(f'SELECT m.* FROM "{DB_SCHEMA}"."Metas" m ORDER BY 1 ASC LIMIT %s', (limit,))
+            cols_c = [d[0] for d in cur.description]
+            union_cols.update(cols_c)
+            rows_c = cur.fetchall()
+            for r in rows_c:
+                d = dict(zip(cols_c, r))
+                d['TenantLayer'] = 'CAPTAR'
+                out_rows.append(d)
+        for slug_row, nome_row, dsn_row in _list_tenants_with_dsn():
+            if not dsn_row:
+                continue
+            with get_db_connection(dsn_row) as conn:
+                cur = conn.cursor()
+                try:
+                    cur.execute(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Metas" (
+                            "IdMeta" SERIAL PRIMARY KEY,
+                            "IdCandidato" INT,
+                            "Numero" INT,
+                            "Partido" VARCHAR(120),
+                            "Cargo" VARCHAR(120),
+                            "IdEleicao" INT,
+                            "DataInicio" TIMESTAMP,
+                            "DataFim" TIMESTAMP,
+                            "MetaVotos" INT,
+                            "MetaDisparos" INT,
+                            "MetaAprovacao" INT,
+                            "MetaRejeicao" INT,
+                            "Ativo" BOOLEAN DEFAULT TRUE,
+                            "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                            "DataUpdate" TIMESTAMP,
+                            "TipoUpdate" VARCHAR(20),
+                            "UsuarioUpdate" VARCHAR(100),
+                            "IdTenant" INT
+                        )
+                        """
+                    )
+                except Exception:
+                    pass
+                cur.execute(f'SELECT m.* FROM "{DB_SCHEMA}"."Metas" m ORDER BY 1 ASC LIMIT %s', (limit,))
+                cols_t = [d[0] for d in cur.description]
+                union_cols.update(cols_t)
+                rows_t = cur.fetchall()
+                for r in rows_t:
+                    d = dict(zip(cols_t, r))
+                    d['TenantLayer'] = (nome_row or slug_row or '').upper() or 'TENANT'
+                    out_rows.append(d)
+        union_cols.add('TenantLayer')
+        all_cols = list(union_cols)
+        for r in out_rows:
+            for c in all_cols:
+                if c not in r:
+                    r[c] = None
+        return {"rows": out_rows, "columns": all_cols}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/metas")
+async def metas_create(payload: dict, request: Request = None):
+    try:
+        cols_meta = get_table_columns("Metas")
+        allowed = {c["name"] for c in cols_meta if c["name"] != "IdMeta"}
+        data = {k: v for k, v in payload.items() if k in allowed}
+        data = _apply_create_defaults(cols_meta, data)
+        try:
+            tid = _tenant_id_from_header(request)
+            nm = _tenant_name_from_header(request)
+            data["IdTenant"] = tid
+            data["TenantLayer"] = nm
+        except Exception:
+            pass
+        keys = list(data.keys())
+        if not keys:
+            raise HTTPException(status_code=400, detail="Sem campos válidos")
+        # ensure tenancy fields
+        try:
+            tid = _tenant_id_from_header(request)
+            nm = _tenant_name_from_header(request)
+            if 'IdTenant' not in keys:
+                keys.append('IdTenant')
+                data['IdTenant'] = tid
+            if 'TenantLayer' not in keys:
+                keys.append('TenantLayer')
+                data['TenantLayer'] = nm
+        except Exception:
+            pass
+        values = [data[k] for k in keys]
+        placeholders = ", ".join(["%s"] * len(values))
+        columns_sql = ", ".join([f'"{k}"' for k in keys])
+        s = (request and request.headers.get('X-Tenant') or 'captar').lower()
+        view = (request and request.headers.get('X-View-Tenant') or '').lower()
+        target_conn = None
+        if s != 'captar':
+            target_conn = get_conn_for_request(request)
+        elif view:
+            if view == 'captar':
+                target_conn = get_db_connection()
+            else:
+                dsn = _get_dsn_by_slug(view)
+                if dsn:
+                    target_conn = get_db_connection(dsn)
+        else:
+            target_conn = get_db_connection()
+        with target_conn as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Metas" (
+                        "IdMeta" SERIAL PRIMARY KEY,
+                        "IdCandidato" INT,
+                        "Numero" INT,
+                        "Partido" VARCHAR(120),
+                        "Cargo" VARCHAR(120),
+                        "IdEleicao" INT,
+                        "DataInicio" TIMESTAMP,
+                        "DataFim" TIMESTAMP,
+                        "MetaVotos" INT,
+                        "MetaDisparos" INT,
+                        "MetaAprovacao" INT,
+                        "MetaRejeicao" INT,
+                        "Ativo" BOOLEAN DEFAULT TRUE,
+                        "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                        "DataUpdate" TIMESTAMP,
+                        "TipoUpdate" VARCHAR(20),
+                        "UsuarioUpdate" VARCHAR(100),
+                        "IdTenant" INT
+                    )
+                    """
+                )
+            except Exception:
+                pass
+            cur.execute(
+                f"INSERT INTO \"{DB_SCHEMA}\".\"Metas\" ({columns_sql}) VALUES ({placeholders}) RETURNING \"IdMeta\"",
+                tuple(values)
+            )
+            new_id = cur.fetchone()[0]
+            conn.commit()
+            return {"id": new_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/metas/{id}")
+async def metas_update(id: int, payload: dict, request: Request = None):
+    try:
+        cols_meta = get_table_columns("Metas")
+        allowed = {c["name"] for c in cols_meta if c["name"] != "IdMeta"}
+        data = {k: v for k, v in payload.items() if k in allowed}
+        data = _apply_update_defaults(cols_meta, data)
+        keys = list(data.keys())
+        if not keys:
+            raise HTTPException(status_code=400, detail="Sem campos válidos")
+        set_parts = ", ".join([f'"{k}"=%s' for k in keys])
+        values = [data[k] for k in keys]
+        s = (request and request.headers.get('X-Tenant') or 'captar').lower()
+        view = (request and request.headers.get('X-View-Tenant') or '').lower()
+        target_conn = None
+        if s != 'captar':
+            target_conn = get_conn_for_request(request)
+        elif view:
+            if view == 'captar':
+                target_conn = get_db_connection()
+            else:
+                dsn = _get_dsn_by_slug(view)
+                if dsn:
+                    target_conn = get_db_connection(dsn)
+        else:
+            target_conn = get_db_connection()
+        with target_conn as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Metas" (
+                        "IdMeta" SERIAL PRIMARY KEY,
+                        "IdCandidato" INT,
+                        "Numero" INT,
+                        "Partido" VARCHAR(120),
+                        "Cargo" VARCHAR(120),
+                        "IdEleicao" INT,
+                        "DataInicio" TIMESTAMP,
+                        "DataFim" TIMESTAMP,
+                        "MetaVotos" INT,
+                        "MetaDisparos" INT,
+                        "MetaAprovacao" INT,
+                        "MetaRejeicao" INT,
+                        "Ativo" BOOLEAN DEFAULT TRUE,
+                        "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                        "DataUpdate" TIMESTAMP,
+                        "TipoUpdate" VARCHAR(20),
+                        "UsuarioUpdate" VARCHAR(100),
+                        "IdTenant" INT
+                    )
+                    """
+                )
+            except Exception:
+                pass
+            cur.execute(
+                f"UPDATE \"{DB_SCHEMA}\".\"Metas\" SET {set_parts} WHERE \"IdMeta\" = %s",
+                tuple(values + [id])
+            )
+            conn.commit()
+            return {"id": id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/metas/{id}")
+async def metas_delete(id: int, request: Request = None):
+    try:
+        s = (request and request.headers.get('X-Tenant') or 'captar').lower()
+        view = (request and request.headers.get('X-View-Tenant') or '').lower()
+        target_conn = None
+        if s != 'captar':
+            target_conn = get_conn_for_request(request)
+        elif view:
+            if view == 'captar':
+                target_conn = get_db_connection()
+            else:
+                dsn = _get_dsn_by_slug(view)
+                if dsn:
+                    target_conn = get_db_connection(dsn)
+        else:
+            target_conn = get_db_connection()
+        with target_conn as conn:
+            cur = conn.cursor()
+            cur.execute(f'DELETE FROM "{DB_SCHEMA}"."Metas" WHERE "IdMeta" = %s', (id,))
+            conn.commit()
+            return {"deleted": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/eleicoes")
+async def eleicoes_create(payload: dict, request: Request = None):
+    try:
+        cols_meta = get_table_columns("Eleicoes")
+        allowed = {c["name"] for c in cols_meta if c["name"] != "IdEleicao"}
+        data = {k: v for k, v in payload.items() if k in allowed}
+        data = _apply_create_defaults(cols_meta, data)
+        try:
+            tid = _tenant_id_from_header(request)
+            nm = _tenant_name_from_header(request)
+            data["IdTenant"] = tid
+            data["TenantLayer"] = nm
+        except Exception:
+            pass
+        keys = list(data.keys())
+        if not keys:
+            raise HTTPException(status_code=400, detail="Sem campos válidos")
+        try:
+            tid = _tenant_id_from_header(request)
+            nm = _tenant_name_from_header(request)
+            if 'IdTenant' not in keys:
+                keys.append('IdTenant')
+                data['IdTenant'] = tid
+            if 'TenantLayer' not in keys:
+                keys.append('TenantLayer')
+                data['TenantLayer'] = nm
+        except Exception:
+            pass
+        values = [data[k] for k in keys]
+        placeholders = ", ".join(["%s"] * len(values))
+        columns_sql = ", ".join([f'"{k}"' for k in keys])
+        s = (request and request.headers.get('X-Tenant') or 'captar').lower()
+        view = (request and request.headers.get('X-View-Tenant') or '').lower()
+        target_conn = None
+        if s != 'captar':
+            target_conn = get_conn_for_request(request)
+        elif view:
+            if view == 'captar':
+                target_conn = get_db_connection()
+            else:
+                dsn = _get_dsn_by_slug(view)
+                if dsn:
+                    target_conn = get_db_connection(dsn)
+        else:
+            target_conn = get_db_connection()
+        with target_conn as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Eleicoes" (
+                        "IdEleicao" SERIAL PRIMARY KEY,
+                        "Nome" VARCHAR(255) NOT NULL,
+                        "Ano" INT,
+                        "Turno" INT,
+                        "Cargo" VARCHAR(120),
+                        "DataInicio" TIMESTAMP,
+                        "DataFim" TIMESTAMP,
+                        "Ativo" BOOLEAN DEFAULT TRUE,
+                        "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                        "DataUpdate" TIMESTAMP,
+                        "TipoUpdate" VARCHAR(20),
+                        "UsuarioUpdate" VARCHAR(100),
+                        "IdTenant" INT
+                    )
+                    """
+                )
+            except Exception:
+                pass
+            cur.execute(
+                f"INSERT INTO \"{DB_SCHEMA}\".\"Eleicoes\" ({columns_sql}) VALUES ({placeholders}) RETURNING \"IdEleicao\"",
+                tuple(values)
+            )
+            new_id = cur.fetchone()[0]
+            conn.commit()
+            return {"id": new_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/eleicoes/{id}")
+async def eleicoes_update(id: int, payload: dict, request: Request = None):
+    try:
+        cols_meta = get_table_columns("Eleicoes")
+        allowed = {c["name"] for c in cols_meta if c["name"] != "IdEleicao"}
+        data = {k: v for k, v in payload.items() if k in allowed}
+        data = _apply_update_defaults(cols_meta, data)
+        keys = list(data.keys())
+        if not keys:
+            raise HTTPException(status_code=400, detail="Sem campos válidos")
+        set_parts = ", ".join([f'"{k}"=%s' for k in keys])
+        values = [data[k] for k in keys]
+        s = (request and request.headers.get('X-Tenant') or 'captar').lower()
+        view = (request and request.headers.get('X-View-Tenant') or '').lower()
+        target_conn = None
+        if s != 'captar':
+            target_conn = get_conn_for_request(request)
+        elif view:
+            if view == 'captar':
+                target_conn = get_db_connection()
+            else:
+                dsn = _get_dsn_by_slug(view)
+                if dsn:
+                    target_conn = get_db_connection(dsn)
+        else:
+            target_conn = get_db_connection()
+        with target_conn as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Eleicoes" (
+                        "IdEleicao" SERIAL PRIMARY KEY,
+                        "Nome" VARCHAR(255) NOT NULL,
+                        "Ano" INT,
+                        "Turno" INT,
+                        "Cargo" VARCHAR(120),
+                        "DataInicio" TIMESTAMP,
+                        "DataFim" TIMESTAMP,
+                        "Ativo" BOOLEAN DEFAULT TRUE,
+                        "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                        "DataUpdate" TIMESTAMP,
+                        "TipoUpdate" VARCHAR(20),
+                        "UsuarioUpdate" VARCHAR(100),
+                        "IdTenant" INT
+                    )
+                    """
+                )
+            except Exception:
+                pass
+            cur.execute(
+                f"UPDATE \"{DB_SCHEMA}\".\"Eleicoes\" SET {set_parts} WHERE \"IdEleicao\" = %s",
+                tuple(values + [id])
+            )
+            conn.commit()
+            return {"id": id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/eleicoes/{id}")
+async def eleicoes_delete(id: int, request: Request = None):
+    try:
+        s = (request and request.headers.get('X-Tenant') or 'captar').lower()
+        view = (request and request.headers.get('X-View-Tenant') or '').lower()
+        target_conn = None
+        if s != 'captar':
+            target_conn = get_conn_for_request(request)
+        elif view:
+            if view == 'captar':
+                target_conn = get_db_connection()
+            else:
+                dsn = _get_dsn_by_slug(view)
+                if dsn:
+                    target_conn = get_db_connection(dsn)
+        else:
+            target_conn = get_db_connection()
+        with target_conn as conn:
+            cur = conn.cursor()
+            cur.execute(f'DELETE FROM "{DB_SCHEMA}"."Eleicoes" WHERE "IdEleicao" = %s', (id,))
+            conn.commit()
+            return {"deleted": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/candidatos")
+async def candidatos_create(payload: dict, request: Request = None):
+    try:
+        cols_meta = get_table_columns("Candidatos")
+        allowed = {c["name"] for c in cols_meta if c["name"] != "IdCandidato"}
+        data = {k: v for k, v in payload.items() if k in allowed}
+        data = _apply_create_defaults(cols_meta, data)
+        try:
+            tid = _tenant_id_from_header(request)
+            nm = _tenant_name_from_header(request)
+            data["IdTenant"] = tid
+            data["TenantLayer"] = nm
+        except Exception:
+            pass
+        foto = str(data.get('Foto') or '')
+        if foto:
+            ok_type = foto.startswith('data:image/')
+            approx = int(len(foto) * 3 / 4)
+            if (not ok_type) or approx > (2 * 1024 * 1024):
+                raise HTTPException(status_code=400, detail='Foto inválida (tipo ou tamanho)')
+        keys = list(data.keys())
+        if not keys:
+            raise HTTPException(status_code=400, detail="Sem campos válidos")
+        try:
+            tid = _tenant_id_from_header(request)
+            nm = _tenant_name_from_header(request)
+            if 'IdTenant' not in keys:
+                keys.append('IdTenant')
+                data['IdTenant'] = tid
+            if 'TenantLayer' not in keys:
+                keys.append('TenantLayer')
+                data['TenantLayer'] = nm
+        except Exception:
+            pass
+        values = [data[k] for k in keys]
+        placeholders = ", ".join(["%s"] * len(values))
+        columns_sql = ", ".join([f'"{k}"' for k in keys])
+        s = (request and request.headers.get('X-Tenant') or 'captar').lower()
+        view = (request and request.headers.get('X-View-Tenant') or '').lower()
+        target_conn = None
+        if s != 'captar':
+            target_conn = get_conn_for_request(request)
+        elif view:
+            if view == 'captar':
+                target_conn = get_db_connection()
+            else:
+                dsn = _get_dsn_by_slug(view)
+                if dsn:
+                    target_conn = get_db_connection(dsn)
+        else:
+            target_conn = get_db_connection()
+        with target_conn as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Candidatos" (
+                        "IdCandidato" SERIAL PRIMARY KEY,
+                        "Nome" VARCHAR(255) NOT NULL,
+                        "Numero" INT,
+                        "Partido" VARCHAR(120),
+                        "Cargo" VARCHAR(120),
+                        "Foto" TEXT,
+                        "Ativo" BOOLEAN DEFAULT TRUE,
+                        "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                        "DataUpdate" TIMESTAMP,
+                        "TipoUpdate" VARCHAR(20),
+                        "UsuarioUpdate" VARCHAR(100),
+                        "IdTenant" INT
+                    )
+                    """
+                )
+            except Exception:
+                pass
+            cur.execute(
+                f"INSERT INTO \"{DB_SCHEMA}\".\"Candidatos\" ({columns_sql}) VALUES ({placeholders}) RETURNING \"IdCandidato\"",
+                tuple(values)
+            )
+            new_id = cur.fetchone()[0]
+            conn.commit()
+            return {"id": new_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/candidatos/{id}")
+async def candidatos_update(id: int, payload: dict, request: Request = None):
+    try:
+        cols_meta = get_table_columns("Candidatos")
+        allowed = {c["name"] for c in cols_meta if c["name"] != "IdCandidato"}
+        data = {k: v for k, v in payload.items() if k in allowed}
+        data = _apply_update_defaults(cols_meta, data)
+        foto = str(data.get('Foto') or '')
+        if foto:
+            ok_type = foto.startswith('data:image/')
+            approx = int(len(foto) * 3 / 4)
+            if (not ok_type) or approx > (2 * 1024 * 1024):
+                raise HTTPException(status_code=400, detail='Foto inválida (tipo ou tamanho)')
+        keys = list(data.keys())
+        if not keys:
+            raise HTTPException(status_code=400, detail="Sem campos válidos")
+        set_parts = ", ".join([f'"{k}"=%s' for k in keys])
+        values = [data[k] for k in keys]
+        s = (request and request.headers.get('X-Tenant') or 'captar').lower()
+        view = (request and request.headers.get('X-View-Tenant') or '').lower()
+        target_conn = None
+        if s != 'captar':
+            target_conn = get_conn_for_request(request)
+        elif view:
+            if view == 'captar':
+                target_conn = get_db_connection()
+            else:
+                dsn = _get_dsn_by_slug(view)
+                if dsn:
+                    target_conn = get_db_connection(dsn)
+        else:
+            target_conn = get_db_connection()
+        with target_conn as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Candidatos" (
+                        "IdCandidato" SERIAL PRIMARY KEY,
+                        "Nome" VARCHAR(255) NOT NULL,
+                        "Numero" INT,
+                        "Partido" VARCHAR(120),
+                        "Cargo" VARCHAR(120),
+                        "Foto" TEXT,
+                        "Ativo" BOOLEAN DEFAULT TRUE,
+                        "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                        "DataUpdate" TIMESTAMP,
+                        "TipoUpdate" VARCHAR(20),
+                        "UsuarioUpdate" VARCHAR(100),
+                        "IdTenant" INT
+                    )
+                    """
+                )
+            except Exception:
+                pass
+            cur.execute(
+                f"UPDATE \"{DB_SCHEMA}\".\"Candidatos\" SET {set_parts} WHERE \"IdCandidato\" = %s",
+                tuple(values + [id])
+            )
+            conn.commit()
+            return {"id": id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/candidatos/{id}")
+async def candidatos_delete(id: int, request: Request = None):
+    try:
+        s = (request and request.headers.get('X-Tenant') or 'captar').lower()
+        view = (request and request.headers.get('X-View-Tenant') or '').lower()
+        target_conn = None
+        if s != 'captar':
+            target_conn = get_conn_for_request(request)
+        elif view:
+            if view == 'captar':
+                target_conn = get_db_connection()
+            else:
+                dsn = _get_dsn_by_slug(view)
+                if dsn:
+                    target_conn = get_db_connection(dsn)
+        else:
+            target_conn = get_db_connection()
+        with target_conn as conn:
+            cur = conn.cursor()
+            cur.execute(f'DELETE FROM "{DB_SCHEMA}"."Candidatos" WHERE "IdCandidato" = %s', (id,))
+            conn.commit()
+            return {"deleted": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

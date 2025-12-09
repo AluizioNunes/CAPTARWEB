@@ -254,18 +254,10 @@ export default function UsuariosModal({ open, initial, onCancel, onSaved }: Prop
   const handleOk = async () => {
     try {
       const values = await form.validateFields()
-      if (values.Perfil && !values.IdPerfil) {
-        const idp = perfilMap[String(values.Perfil)]
-        if (idp !== undefined) values.IdPerfil = idp
-      }
       if (values.Funcao) {
         const label = String(values.Funcao)
-        const idf = funcaoMap[label]
-        if (idf !== undefined) values.IdFuncao = idf
         values.Funcao = label
       }
-      if (values.IdPerfil) delete (values as any).Perfil
-      if (values.IdFuncao) delete (values as any).Funcao
       const fname = String(values.Nome || '').trim()
       const ffunc = String(values.Funcao || '').toUpperCase().trim()
       if (ffunc === 'ADMINISTRADOR' || ffunc === 'COORDENADOR') {
@@ -286,14 +278,13 @@ export default function UsuariosModal({ open, initial, onCancel, onSaved }: Prop
         values.Celular = c.length > 15 ? c.slice(0, 15) : c
       }
       const trySave = async (): Promise<number> => {
-        const allowed = new Set([...schemaBaseNames, 'IdPerfil', 'IdFuncao'])
+        const allowed = new Set([...schemaBaseNames])
         allowed.delete('IdTenant')
         const payload: any = {}
         for (const k of Object.keys(values)) {
           if (allowed.has(k)) payload[k] = (values as any)[k]
         }
-        if (payload.IdPerfil) delete payload.Perfil
-        if (payload.IdFuncao) delete payload.Funcao
+        // manter Perfil e Funcao como textos conforme schema atual
         if (initial?.IdUsuario) {
           const r = await api.updateUsuario(initial.IdUsuario, payload)
           message.success('Usuário atualizado')

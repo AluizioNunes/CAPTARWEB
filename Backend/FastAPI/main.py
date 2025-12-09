@@ -173,6 +173,25 @@ def get_redis_client():
             _redis_client = None
     return _redis_client
 
+def rate_limit(request: Request, key: str, window_sec: int = 60, limit: int = 100):
+    try:
+        rc = get_redis_client()
+        slug = request.headers.get('X-Tenant') or 'captar'
+        ip = request.client.host if hasattr(request, 'client') and request.client else 'local'
+        k = f"rl:{slug}:{key}:{ip}"
+        if rc:
+            cur = rc.get(k)
+            n = int(cur) if cur and str(cur).isdigit() else 0
+            n += 1
+            if n == 1:
+                rc.setex(k, window_sec, str(n))
+            else:
+                rc.set(k, str(n))
+            if n > limit:
+                raise HTTPException(status_code=429, detail='Too Many Requests')
+    except Exception:
+        pass
+
 def _tenant_slug(request: Request) -> str:
     return (request.headers.get('X-Tenant') or 'captar').lower()
 
@@ -352,6 +371,16 @@ def apply_migrations():
         conn.autocommit = True
         cur = conn.cursor()
         try:
+            cur.execute(f'DROP TABLE IF EXISTS {DB_SCHEMA}.usuarios CASCADE')
+            actions.append('Dropped legacy table captar.usuarios (lowercase)')
+        except Exception:
+            pass
+        try:
+            cur.execute(f'DROP TABLE IF EXISTS "{DB_SCHEMA}"."usuarios" CASCADE')
+            actions.append('Dropped legacy table "captar"."usuarios" (lowercase, quoted)')
+        except Exception:
+            pass
+        try:
             cur.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Usuarios" (
@@ -373,17 +402,7 @@ def apply_migrations():
             actions.append('Usuarios created')
         except Exception:
             pass
-        try:
-            import os
-            base_dir = os.path.dirname(__file__)
-            schema_path = os.path.join(base_dir, 'schema.sql')
-            if os.path.exists(schema_path):
-                with open(schema_path, 'r', encoding='utf-8') as f:
-                    sql = f.read()
-                    cur.execute(sql)
-                    actions.append('schema.sql executed')
-        except Exception:
-            pass
+        # legacy schema.sql execution removed to avoid recreating lowercase 'usuarios'
         try:
             cur.execute(
                 f"""
@@ -682,6 +701,16 @@ def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):
             cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{DB_SCHEMA}"')
         except Exception:
             pass
+        try:
+            cur.execute(f'DROP TABLE IF EXISTS {DB_SCHEMA}.usuarios CASCADE')
+            actions.append('Dropped legacy table captar.usuarios (lowercase) in tenant DB')
+        except Exception:
+            pass
+        try:
+            cur.execute(f'DROP TABLE IF EXISTS "{DB_SCHEMA}"."usuarios" CASCADE')
+            actions.append('Dropped legacy table "captar"."usuarios" (lowercase, quoted) in tenant DB')
+        except Exception:
+            pass
         # Garantir tabela Usuarios compatível no banco do tenant
         try:
             cur.execute(
@@ -703,6 +732,46 @@ def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):
                 """
             )
             actions.append('Usuarios ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(f"ALTER TABLE \"{DB_SCHEMA}\".\"Usuarios\" ADD COLUMN IF NOT EXISTS \"DataCadastro\" timestamp without time zone DEFAULT CURRENT_TIMESTAMP")
+            actions.append('Usuarios.DataCadastro ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(f"ALTER TABLE \"{DB_SCHEMA}\".\"Usuarios\" ADD COLUMN IF NOT EXISTS \"DataUpdate\" timestamp without time zone")
+            actions.append('Usuarios.DataUpdate ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(f"ALTER TABLE \"{DB_SCHEMA}\".\"Usuarios\" ADD COLUMN IF NOT EXISTS \"TipoUpdate\" varchar(20)")
+            actions.append('Usuarios.TipoUpdate ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(f"ALTER TABLE \"{DB_SCHEMA}\".\"Usuarios\" ADD COLUMN IF NOT EXISTS \"UsuarioUpdate\" varchar(100)")
+            actions.append('Usuarios.UsuarioUpdate ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(f"ALTER TABLE \"{DB_SCHEMA}\".\"Usuarios\" ADD COLUMN IF NOT EXISTS \"CadastranteUpdate\" varchar(100)")
+            actions.append('Usuarios.CadastranteUpdate ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(f"ALTER TABLE \"{DB_SCHEMA}\".\"Usuarios\" ADD COLUMN IF NOT EXISTS \"Coordenador\" VARCHAR(120)")
+            actions.append('Usuarios.Coordenador ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(f"ALTER TABLE \"{DB_SCHEMA}\".\"Usuarios\" ADD COLUMN IF NOT EXISTS \"Supervisor\" VARCHAR(120)")
+            actions.append('Usuarios.Supervisor ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(f"ALTER TABLE \"{DB_SCHEMA}\".\"Usuarios\" ADD COLUMN IF NOT EXISTS \"Ativista\" VARCHAR(120)")
+            actions.append('Usuarios.Ativista ensured (tenant DB)')
         except Exception:
             pass
         try:
@@ -733,17 +802,7 @@ def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):
             actions.append('Funcoes ensured (tenant DB)')
         except Exception:
             pass
-        try:
-            import os
-            base_dir = os.path.dirname(__file__)
-            schema_path = os.path.join(base_dir, 'schema.sql')
-            if os.path.exists(schema_path):
-                with open(schema_path, 'r', encoding='utf-8') as f:
-                    sql = f.read()
-                    cur.execute(sql)
-                    actions.append('schema.sql executed')
-        except Exception:
-            pass
+        # legacy schema.sql execution removed to avoid recreating lowercase 'usuarios' in tenant DB
         targets = [
             ("Usuarios", "Celular"),
         ]
@@ -775,10 +834,20 @@ def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):
                 (f"ADMIN.{slug_upper}",)
             )
             m = cur.fetchone()[0]
+            admin_user = f"ADMIN.{slug_upper}"
+            cur.execute(
+                f"SELECT \"IdUsuario\" FROM \"{DB_SCHEMA}\".\"Usuarios\" WHERE UPPER(TRIM(\"Usuario\")) = 'ADMIN' LIMIT 1"
+            )
+            row_fix = cur.fetchone()
+            if row_fix:
+                cur.execute(
+                    f"UPDATE \"{DB_SCHEMA}\".\"Usuarios\" SET \"Usuario\" = %s, \"Senha\" = %s WHERE \"IdUsuario\" = %s",
+                    (admin_user, 'admin123', int(row_fix[0]))
+                )
+                actions.append('Default admin user adjusted (tenant DB)')
             if m == 0:
                 admin_email = f"admin@{(slug or 'tenant').lower()}.local"
-                admin_user = f"ADMIN.{slug_upper}"
-                admin_pass = f"Admin123{(slug or 'tenant').lower()}"
+                admin_pass = 'admin123'
                 cur.execute(
                     f"INSERT INTO \"{DB_SCHEMA}\".\"Usuarios\" (\"Nome\", \"Email\", \"Senha\", \"Usuario\", \"Perfil\", \"Funcao\", \"Ativo\") VALUES (%s,%s,%s,%s,%s,%s,%s)",
                     ('ADMINISTRADOR', admin_email, admin_pass, admin_user, 'ADMINISTRADOR', 'ADMINISTRADOR', True)
@@ -1229,23 +1298,124 @@ async def usuarios_schema():
 @app.get("/api/usuarios")
 async def usuarios_list(limit: int = 200, request: Request = None):
     try:
-        with get_conn_for_request(request) as conn:
-            cursor = conn.cursor()
-            slug = request.headers.get('X-Tenant') if request else 'captar'
-            if str(slug or '').lower() == 'captar':
+        slug = request.headers.get('X-Tenant') if request else 'captar'
+        view = request.headers.get('X-View-Tenant') if request else None
+        s = str(slug or '').lower()
+        if s != 'captar':
+            with get_conn_for_request(request) as conn:
+                cursor = conn.cursor()
                 cursor.execute(
-                    f"SELECT u.*, t.\"Nome\" AS \"TenantLayer\" FROM \"{DB_SCHEMA}\".\"Usuarios\" u LEFT JOIN \"{DB_SCHEMA}\".\"Tenant\" t ON u.\"IdTenant\" = t.\"IdTenant\" ORDER BY 1 ASC LIMIT %s",
+                    f"SELECT u.* FROM \"{DB_SCHEMA}\".\"Usuarios\" u ORDER BY 1 ASC LIMIT %s",
                     (limit,)
                 )
-            else:
-                cursor.execute(
-                    f"SELECT u.*, t.\"Nome\" AS \"TenantLayer\" FROM \"{DB_SCHEMA}\".\"Usuarios\" u LEFT JOIN \"{DB_SCHEMA}\".\"Tenant\" t ON u.\"IdTenant\" = t.\"IdTenant\" WHERE u.\"IdTenant\" = %s ORDER BY 1 ASC LIMIT %s",
-                    (_tenant_id_from_header(request), limit)
-                )
-            colnames = [desc[0] for desc in cursor.description]
-            rows = cursor.fetchall()
-            data = [dict(zip(colnames, row)) for row in rows]
-            return {"rows": data, "columns": colnames}
+                colnames = [desc[0] for desc in cursor.description]
+                rows = cursor.fetchall()
+                data = [dict(zip(colnames, row)) for row in rows]
+                tn = _tenant_name_from_header(request)
+                for d in data:
+                    d['TenantLayer'] = tn
+                if 'TenantLayer' not in colnames:
+                    colnames.append('TenantLayer')
+                return {"rows": data, "columns": colnames}
+        # s == 'captar'
+        # optional view filter
+        view_s = str(view or '').lower()
+        if view_s:
+            if view_s == 'captar':
+                with get_db_connection() as conn_c:
+                    cur_c = conn_c.cursor()
+                    cur_c.execute(f"SELECT u.* FROM \"{DB_SCHEMA}\".\"Usuarios\" u ORDER BY 1 ASC LIMIT %s", (limit,))
+                    cols_c = [d[0] for d in cur_c.description]
+                    rows_c = cur_c.fetchall()
+                    data = [dict(zip(cols_c, r)) for r in rows_c]
+                    for d in data:
+                        d['TenantLayer'] = 'CAPTAR'
+                    if 'TenantLayer' not in cols_c:
+                        cols_c.append('TenantLayer')
+                    return {"rows": data, "columns": cols_c}
+            dsn = _get_dsn_by_slug(view_s)
+            if dsn:
+                try:
+                    with get_db_connection(dsn) as conn_t:
+                        cur_t = conn_t.cursor()
+                        cur_t.execute(f"SELECT u.* FROM \"{DB_SCHEMA}\".\"Usuarios\" u ORDER BY 1 ASC LIMIT %s", (limit,))
+                        cols_t = [d[0] for d in cur_t.description]
+                        rows_t = cur_t.fetchall()
+                        data = [dict(zip(cols_t, r)) for r in rows_t]
+                        name = view_s.upper()
+                        try:
+                            with get_db_connection() as conn_c2:
+                                c2 = conn_c2.cursor()
+                                c2.execute(f'SELECT "Nome" FROM "{DB_SCHEMA}"."Tenant" WHERE LOWER("Slug")=%s LIMIT 1', (view_s,))
+                                rw = c2.fetchone()
+                                if rw and rw[0]:
+                                    name = str(rw[0]).upper()
+                        except Exception:
+                            pass
+                        for d in data:
+                            d['TenantLayer'] = name
+                        if 'TenantLayer' not in cols_t:
+                            cols_t.append('TenantLayer')
+                        return {"rows": data, "columns": cols_t}
+                except Exception:
+                    pass
+        # aggregate all tenants
+        union_cols = set()
+        out_rows = []
+        # CAPTAR central rows
+        with get_db_connection() as conn_c:
+            cur_c = conn_c.cursor()
+            try:
+                if not view_s or view_s == 'captar':
+                    cur_c.execute(
+                        f"SELECT u.* FROM \"{DB_SCHEMA}\".\"Usuarios\" u ORDER BY 1 ASC LIMIT %s",
+                        (limit,)
+                    )
+                    cols_c = [d[0] for d in cur_c.description]
+                    union_cols.update(cols_c)
+                    rows_c = cur_c.fetchall()
+                    for r in rows_c:
+                        d = dict(zip(cols_c, r))
+                        d['TenantLayer'] = 'CAPTAR'
+                        out_rows.append(d)
+            except Exception:
+                pass
+            # tenants via DSN
+            cur_c.execute(
+                f'SELECT t."Slug", t."Nome", p."Valor" FROM "{DB_SCHEMA}"."Tenant" t LEFT JOIN "{DB_SCHEMA}"."TenantParametros" p ON p."IdTenant" = t."IdTenant" AND p."Chave" = %s',
+                ('DB_DSN',)
+            )
+            tenants = cur_c.fetchall()
+        for slug_row, nome_row, dsn_row in tenants:
+            try:
+                dsn = str(dsn_row or '')
+                if not dsn:
+                    continue
+                if view_s and str(slug_row or '').lower() != view_s:
+                    continue
+                with get_db_connection(dsn) as conn_t:
+                    cur_t = conn_t.cursor()
+                    cur_t.execute(
+                        f"SELECT u.* FROM \"{DB_SCHEMA}\".\"Usuarios\" u ORDER BY 1 ASC LIMIT %s",
+                        (limit,)
+                    )
+                    cols_t = [d[0] for d in cur_t.description]
+                    union_cols.update(cols_t)
+                    rows_t = cur_t.fetchall()
+                    for r in rows_t:
+                        d = dict(zip(cols_t, r))
+                        d['TenantLayer'] = str(nome_row or slug_row or '').upper() or 'TENANT'
+                        out_rows.append(d)
+            except Exception:
+                pass
+        union_cols.add('TenantLayer')
+        all_cols = list(union_cols)
+        # normalize rows to include all columns
+        for r in out_rows:
+            for c in all_cols:
+                if c not in r:
+                    r[c] = None
+        return {"rows": out_rows, "columns": all_cols}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1253,7 +1423,17 @@ async def usuarios_list(limit: int = 200, request: Request = None):
 async def usuarios_create(payload: dict, request: Request):
     try:
         rate_limit(request, "usuarios_create", 120)
+        slug_hdr = _tenant_slug(request)
+        dsn_cur = _get_tenant_dsn(slug_hdr)
         cols_meta = get_table_columns("Usuarios")
+        if dsn_cur:
+            try:
+                with get_db_connection(dsn_cur) as conn_cols:
+                    cm = _get_table_columns_for_conn(conn_cols, "Usuarios")
+                    if cm:
+                        cols_meta = cm
+            except Exception:
+                pass
         allowed = {c["name"] for c in cols_meta if c["name"] != "IdUsuario"}
         data = {k: v for k, v in payload.items() if k in allowed}
         data = _apply_create_defaults(cols_meta, data)
@@ -1334,6 +1514,14 @@ async def usuarios_update(id: int, payload: dict, request: Request):
         cols_meta = get_table_columns("Usuarios")
         allowed = {c["name"] for c in cols_meta if c["name"] != "IdUsuario"}
         data = {k: v for k, v in payload.items() if k in allowed}
+        with get_conn_for_request(request) as conn_check:
+            cur0 = conn_check.cursor()
+            cur0.execute(f'SELECT "Usuario" FROM "{DB_SCHEMA}"."Usuarios" WHERE "IdUsuario" = %s LIMIT 1', (id,))
+            row0 = cur0.fetchone()
+            if row0:
+                u0 = str(row0[0] or '').strip().upper()
+                if u0 == 'ADMIN' or u0.startswith('ADMIN.'):
+                    raise HTTPException(status_code=403, detail='Usuário padrão do sistema não pode ser alterado')
         try:
             with get_db_connection() as conn:
                 cur = conn.cursor()
@@ -1439,6 +1627,12 @@ async def usuarios_delete(id: int, request: Request):
     try:
         with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
+            cursor.execute(f'SELECT "Usuario" FROM "{DB_SCHEMA}"."Usuarios" WHERE "IdUsuario" = %s LIMIT 1', (id,))
+            r0 = cursor.fetchone()
+            if r0:
+                u0 = str(r0[0] or '').strip().upper()
+                if u0 == 'ADMIN' or u0.startswith('ADMIN.'):
+                    raise HTTPException(status_code=403, detail='Usuário padrão do sistema não pode ser removido')
             cursor.execute(f"DELETE FROM \"{DB_SCHEMA}\".\"Usuarios\" WHERE \"IdUsuario\" = %s", (id,))
             conn.commit()
             try:
@@ -1579,7 +1773,84 @@ def get_table_columns(table: str):
                 rc.setex(f"schema:columns:{table}", 600, json.dumps(out))
             except Exception:
                 pass
-        return out
+    return out
+
+def _get_dsn_by_slug(slug: str):
+    try:
+        s = str(slug or '').lower()
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(f'SELECT t."IdTenant" FROM "{DB_SCHEMA}"."Tenant" t WHERE LOWER(t."Slug")=%s LIMIT 1', (s,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            idt = int(row[0])
+            cur.execute(f'SELECT p."Valor" FROM "{DB_SCHEMA}"."TenantParametros" p WHERE p."IdTenant"=%s AND p."Chave"=%s LIMIT 1', (idt, 'DB_DSN'))
+            r2 = cur.fetchone()
+            return str(r2[0]) if r2 and r2[0] else None
+    except Exception:
+        return None
+def _aggregate_table_all_tenants(table: str, limit: int = 500):
+    union_cols = set()
+    out_rows = []
+    try:
+        with get_db_connection() as conn_c:
+            cur_c = conn_c.cursor()
+            try:
+                cur_c.execute(f"SELECT * FROM {DB_SCHEMA}.{table} ORDER BY 1 ASC LIMIT %s", (limit,))
+                cols_c = [d[0] for d in cur_c.description]
+                union_cols.update(cols_c)
+                rows_c = cur_c.fetchall()
+                for r in rows_c:
+                    d = dict(zip(cols_c, r))
+                    d['TenantLayer'] = 'CAPTAR'
+                    out_rows.append(d)
+            except Exception:
+                pass
+            tenants = _list_tenants_with_dsn()
+        for slug_row, nome_row, dsn_row in tenants:
+            try:
+                dsn = str(dsn_row or '')
+                if not dsn:
+                    continue
+                with get_db_connection(dsn) as conn_t:
+                    cur_t = conn_t.cursor()
+                    cur_t.execute(f"SELECT * FROM {DB_SCHEMA}.{table} ORDER BY 1 ASC LIMIT %s", (limit,))
+                    cols_t = [d[0] for d in cur_t.description]
+                    union_cols.update(cols_t)
+                    rows_t = cur_t.fetchall()
+                    for r in rows_t:
+                        d = dict(zip(cols_t, r))
+                        d['TenantLayer'] = str(nome_row or slug_row or '').upper() or 'TENANT'
+                        out_rows.append(d)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    union_cols.add('TenantLayer')
+    all_cols = list(union_cols)
+    for r in out_rows:
+        for c in all_cols:
+            if c not in r:
+                r[c] = None
+    return out_rows, all_cols
+
+def _get_table_columns_for_conn(conn, table: str):
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT column_name, data_type, is_nullable, character_maximum_length
+            FROM information_schema.columns
+            WHERE table_schema = %s AND table_name = %s
+            ORDER BY ordinal_position
+            """,
+            (DB_SCHEMA, table)
+        )
+        rows = cur.fetchall()
+        return [{"name": r[0], "type": r[1], "nullable": (r[2] == 'YES'), "maxLength": r[3]} for r in rows]
+    except Exception:
+        return []
 
 @app.get("/api/perfil/schema")
 async def perfil_schema():
@@ -2031,9 +2302,11 @@ async def dashboard_stats(request: Request = None):
     try:
         rc = get_redis_client()
         slug = request and request.headers.get('X-Tenant') or 'captar'
+        view = request and request.headers.get('X-View-Tenant') or None
         if rc and request:
             try:
-                raw = rc.get(f"tenant:{str(slug).lower()}:dashboard:stats")
+                cache_key = f"tenant:{str(slug).lower()}:dashboard:stats:{(str(view or '').lower() or 'all')}"
+                raw = rc.get(cache_key)
                 if raw:
                     return json.loads(raw)
             except Exception:
@@ -2041,23 +2314,9 @@ async def dashboard_stats(request: Request = None):
         with get_db_connection() as conn:
             cursor = conn.cursor()
             tid = _tenant_id_from_header(request) if request else 1
+            s = str(slug or '').lower()
 
-            if str(slug or '').lower() == 'captar':
-                cursor.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.eleitores")
-                total_eleitores = cursor.fetchone()[0]
-                cursor.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.ativistas")
-                total_ativistas = cursor.fetchone()[0]
-                cursor.execute(f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Usuarios\"")
-                total_usuarios = cursor.fetchone()[0]
-                cursor.execute(
-                    f"SELECT COALESCE(zona_eleitoral, 'N/D') AS zona, COUNT(*) AS qtd FROM {DB_SCHEMA}.eleitores GROUP BY zona_eleitoral ORDER BY qtd DESC LIMIT 20"
-                )
-                zonas_rows = cursor.fetchall()
-                cursor.execute(
-                    f"SELECT COALESCE(tipo_apoio, 'N/D') AS funcao, COUNT(*) AS qtd FROM {DB_SCHEMA}.ativistas GROUP BY tipo_apoio ORDER BY qtd DESC LIMIT 20"
-                )
-                ativistas_por_funcao_rows = cursor.fetchall()
-            else:
+            if s != 'captar':
                 cursor.execute(
                     f"SELECT COUNT(*) FROM {DB_SCHEMA}.eleitores e JOIN \"{DB_SCHEMA}\".\"Usuarios\" u ON e.criado_por = u.\"IdUsuario\" WHERE u.\"IdTenant\" = %s",
                     (tid,)
@@ -2090,6 +2349,116 @@ async def dashboard_stats(request: Request = None):
                     ativistas_por_funcao_rows = cursor.fetchall()
                 except Exception:
                     ativistas_por_funcao_rows = []
+            else:
+                cursor.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.eleitores")
+                total_eleitores = cursor.fetchone()[0]
+                try:
+                    cursor.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.ativistas")
+                    total_ativistas = cursor.fetchone()[0]
+                except Exception:
+                    total_ativistas = 0
+                cursor.execute(f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Usuarios\"")
+                total_usuarios = cursor.fetchone()[0]
+                cursor.execute(
+                    f"SELECT COALESCE(zona_eleitoral, 'N/D') AS zona, COUNT(*) AS qtd FROM {DB_SCHEMA}.eleitores GROUP BY zona_eleitoral ORDER BY qtd DESC LIMIT 20"
+                )
+                zonas_rows = cursor.fetchall()
+                try:
+                    cursor.execute(
+                        f"SELECT COALESCE(tipo_apoio, 'N/D') AS funcao, COUNT(*) AS qtd FROM {DB_SCHEMA}.ativistas GROUP BY tipo_apoio ORDER BY qtd DESC LIMIT 20"
+                    )
+                    ativistas_por_funcao_rows = cursor.fetchall()
+                except Exception:
+                    ativistas_por_funcao_rows = []
+                view_s = str(view or '').lower()
+                if view_s:
+                    if view_s == 'captar':
+                        # já central
+                        pass
+                    else:
+                        dsn = _get_dsn_by_slug(view_s)
+                        if dsn:
+                            try:
+                                total_eleitores = 0
+                                total_ativistas = 0
+                                total_usuarios = 0
+                                zonas_rows = []
+                                ativistas_por_funcao_rows = []
+                                with get_db_connection(dsn) as conn_t:
+                                    cur_t = conn_t.cursor()
+                                    try:
+                                        cur_t.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.eleitores")
+                                        total_eleitores = int(cur_t.fetchone()[0])
+                                    except Exception:
+                                        pass
+                                    try:
+                                        cur_t.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.ativistas")
+                                        total_ativistas = int(cur_t.fetchone()[0])
+                                    except Exception:
+                                        pass
+                                    try:
+                                        cur_t.execute(f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Usuarios\"")
+                                        total_usuarios = int(cur_t.fetchone()[0])
+                                    except Exception:
+                                        pass
+                                    try:
+                                        cur_t.execute(
+                                            f"SELECT COALESCE(zona_eleitoral, 'N/D') AS zona, COUNT(*) AS qtd FROM {DB_SCHEMA}.eleitores GROUP BY zona_eleitoral ORDER BY qtd DESC LIMIT 20"
+                                        )
+                                        zonas_rows = cur_t.fetchall()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        cur_t.execute(
+                                            f"SELECT COALESCE(tipo_apoio, 'N/D') AS funcao, COUNT(*) AS qtd FROM {DB_SCHEMA}.ativistas GROUP BY tipo_apoio ORDER BY qtd DESC LIMIT 20"
+                                        )
+                                        ativistas_por_funcao_rows = cur_t.fetchall()
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                if not (str(view or '').strip()):
+                    tenants = _list_tenants_with_dsn()
+                    for slug_row, nome_row, dsn_row in tenants:
+                        try:
+                            dsn = str(dsn_row or '')
+                            if not dsn:
+                                continue
+                            with get_db_connection(dsn) as conn_t:
+                                cur_t = conn_t.cursor()
+                                try:
+                                    cur_t.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.eleitores")
+                                    total_eleitores += int(cur_t.fetchone()[0])
+                                except Exception:
+                                    pass
+                                try:
+                                    cur_t.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.ativistas")
+                                    total_ativistas += int(cur_t.fetchone()[0])
+                                except Exception:
+                                    pass
+                                try:
+                                    cur_t.execute(f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Usuarios\"")
+                                    total_usuarios += int(cur_t.fetchone()[0])
+                                except Exception:
+                                    pass
+                                try:
+                                    cur_t.execute(
+                                        f"SELECT COALESCE(zona_eleitoral, 'N/D') AS zona, COUNT(*) AS qtd FROM {DB_SCHEMA}.eleitores GROUP BY zona_eleitoral"
+                                    )
+                                    add_z = cur_t.fetchall()
+                                    zonas_rows += add_z
+                                except Exception:
+                                    pass
+                                try:
+                                    cur_t.execute(
+                                        f"SELECT COALESCE(tipo_apoio, 'N/D') AS funcao, COUNT(*) AS qtd FROM {DB_SCHEMA}.ativistas GROUP BY tipo_apoio"
+                                    )
+                                    add_a = cur_t.fetchall()
+                                    ativistas_por_funcao_rows += add_a
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
 
             eleitores_por_zona = {row[0]: row[1] for row in zonas_rows}
             ativistas_por_funcao = {row[0]: row[1] for row in ativistas_por_funcao_rows}
@@ -2103,7 +2472,8 @@ async def dashboard_stats(request: Request = None):
             }
             if rc and request:
                 try:
-                    rc.setex(f"tenant:{str(slug).lower()}:dashboard:stats", 30, json.dumps(out))
+                    cache_key = f"tenant:{str(slug).lower()}:dashboard:stats:{(str(view or '').lower() or 'all')}"
+                    rc.setex(cache_key, 30, json.dumps(out))
                 except Exception:
                     pass
             return out
@@ -2971,5 +3341,147 @@ async def usuarios_upload_foto(id: int, request: Request, file: Optional[UploadF
         return {"saved": True, "path": rel_path}
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+def _list_tenants_with_dsn():
+    out = []
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f'SELECT t."Slug", t."Nome", p."Valor" FROM "{DB_SCHEMA}"."Tenant" t LEFT JOIN "{DB_SCHEMA}"."TenantParametros" p ON p."IdTenant" = t."IdTenant" AND p."Chave" = %s',
+                ('DB_DSN',)
+            )
+            rows = cur.fetchall()
+            for r in rows:
+                out.append((str(r[0] or ''), str(r[1] or ''), str(r[2] or '')))
+    except Exception:
+        pass
+    return out
+@app.get("/api/eleitores")
+async def eleitores_list(limit: int = 500, request: Request = None):
+    try:
+        slug = request and request.headers.get('X-Tenant') or 'captar'
+        view = request and request.headers.get('X-View-Tenant') or None
+        s = str(slug or '').lower()
+        if s != 'captar':
+            with get_conn_for_request(request) as conn:
+                cur = conn.cursor()
+                cur.execute(f"SELECT e.* FROM {DB_SCHEMA}.eleitores e ORDER BY 1 ASC LIMIT %s", (limit,))
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                data = [dict(zip(cols, r)) for r in rows]
+                tn = _tenant_name_from_header(request)
+                for d in data:
+                    d['TenantLayer'] = tn
+                if 'TenantLayer' not in cols:
+                    cols.append('TenantLayer')
+                return {"rows": data, "columns": cols}
+        view_s = str(view or '').lower()
+        if view_s:
+            if view_s == 'captar':
+                with get_db_connection() as conn_c:
+                    cur_c = conn_c.cursor()
+                    cur_c.execute(f"SELECT e.* FROM {DB_SCHEMA}.eleitores e ORDER BY 1 ASC LIMIT %s", (limit,))
+                    cols_c = [d[0] for d in cur_c.description]
+                    rows_c = cur_c.fetchall()
+                    data = [dict(zip(cols_c, r)) for r in rows_c]
+                    for d in data:
+                        d['TenantLayer'] = 'CAPTAR'
+                    if 'TenantLayer' not in cols_c:
+                        cols_c.append('TenantLayer')
+                    return {"rows": data, "columns": cols_c}
+            dsn = _get_dsn_by_slug(view_s)
+            if dsn:
+                try:
+                    with get_db_connection(dsn) as conn_t:
+                        cur_t = conn_t.cursor()
+                        cur_t.execute(f"SELECT e.* FROM {DB_SCHEMA}.eleitores e ORDER BY 1 ASC LIMIT %s", (limit,))
+                        cols_t = [d[0] for d in cur_t.description]
+                        rows_t = cur_t.fetchall()
+                        data = [dict(zip(cols_t, r)) for r in rows_t]
+                        name = view_s.upper()
+                        try:
+                            with get_db_connection() as conn_c2:
+                                c2 = conn_c2.cursor()
+                                c2.execute(f'SELECT "Nome" FROM "{DB_SCHEMA}"."Tenant" WHERE LOWER("Slug")=%s LIMIT 1', (view_s,))
+                                rw = c2.fetchone()
+                                if rw and rw[0]:
+                                    name = str(rw[0]).upper()
+                        except Exception:
+                            pass
+                        for d in data:
+                            d['TenantLayer'] = name
+                        if 'TenantLayer' not in cols_t:
+                            cols_t.append('TenantLayer')
+                        return {"rows": data, "columns": cols_t}
+                except Exception:
+                    pass
+        rows, cols = _aggregate_table_all_tenants('eleitores', limit)
+        return {"rows": rows, "columns": cols}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/ativistas")
+async def ativistas_list(limit: int = 500, request: Request = None):
+    try:
+        slug = request and request.headers.get('X-Tenant') or 'captar'
+        view = request and request.headers.get('X-View-Tenant') or None
+        s = str(slug or '').lower()
+        if s != 'captar':
+            with get_conn_for_request(request) as conn:
+                cur = conn.cursor()
+                cur.execute(f"SELECT a.* FROM {DB_SCHEMA}.ativistas a ORDER BY 1 ASC LIMIT %s", (limit,))
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                data = [dict(zip(cols, r)) for r in rows]
+                tn = _tenant_name_from_header(request)
+                for d in data:
+                    d['TenantLayer'] = tn
+                if 'TenantLayer' not in cols:
+                    cols.append('TenantLayer')
+                return {"rows": data, "columns": cols}
+        view_s = str(view or '').lower()
+        if view_s:
+            if view_s == 'captar':
+                with get_db_connection() as conn_c:
+                    cur_c = conn_c.cursor()
+                    cur_c.execute(f"SELECT a.* FROM {DB_SCHEMA}.ativistas a ORDER BY 1 ASC LIMIT %s", (limit,))
+                    cols_c = [d[0] for d in cur_c.description]
+                    rows_c = cur_c.fetchall()
+                    data = [dict(zip(cols_c, r)) for r in rows_c]
+                    for d in data:
+                        d['TenantLayer'] = 'CAPTAR'
+                    if 'TenantLayer' not in cols_c:
+                        cols_c.append('TenantLayer')
+                    return {"rows": data, "columns": cols_c}
+            dsn = _get_dsn_by_slug(view_s)
+            if dsn:
+                try:
+                    with get_db_connection(dsn) as conn_t:
+                        cur_t = conn_t.cursor()
+                        cur_t.execute(f"SELECT a.* FROM {DB_SCHEMA}.ativistas a ORDER BY 1 ASC LIMIT %s", (limit,))
+                        cols_t = [d[0] for d in cur_t.description]
+                        rows_t = cur_t.fetchall()
+                        data = [dict(zip(cols_t, r)) for r in rows_t]
+                        name = view_s.upper()
+                        try:
+                            with get_db_connection() as conn_c2:
+                                c2 = conn_c2.cursor()
+                                c2.execute(f'SELECT "Nome" FROM "{DB_SCHEMA}"."Tenant" WHERE LOWER("Slug")=%s LIMIT 1', (view_s,))
+                                rw = c2.fetchone()
+                                if rw and rw[0]:
+                                    name = str(rw[0]).upper()
+                        except Exception:
+                            pass
+                        for d in data:
+                            d['TenantLayer'] = name
+                        if 'TenantLayer' not in cols_t:
+                            cols_t.append('TenantLayer')
+                        return {"rows": data, "columns": cols_t}
+                except Exception:
+                    pass
+        rows, cols = _aggregate_table_all_tenants('ativistas', limit)
+        return {"rows": rows, "columns": cols}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

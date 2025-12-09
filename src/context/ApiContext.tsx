@@ -8,7 +8,8 @@ export function ApiProvider({ children }: PropsWithChildren<{}>) {
     const cache = new Map<string, any>()
     const getKey = (name: string, args: any[]) => {
       const slug = (typeof window !== 'undefined' ? localStorage.getItem('tenantSlug') : null) || 'captar'
-      return `${slug}:${name}:${JSON.stringify(args)}`
+      const view = (typeof window !== 'undefined' ? localStorage.getItem('viewTenantSlug') : null) || ''
+      return `${slug}:${view}:${name}:${JSON.stringify(args)}`
     }
     const asAny = apiService as any
     const orig = {

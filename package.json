@@ -8,7 +8,10 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "lint": "eslint src --ext ts,tsx --report-unused-disable-directives",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "smoke": "powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1",
+    "smoke:dev": "powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 -IncludeDev",
+    "smoke:full": "powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 -IncludeDev -TenantChecks"
   },
   "dependencies": {
     "@ant-design/icons": "^5.3.7",

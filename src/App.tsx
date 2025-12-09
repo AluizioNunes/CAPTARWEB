@@ -26,7 +26,9 @@ function AppRoutes() {
   const { isAuthenticated } = useAuthStore()
   const location = useLocation()
   const tenantSlug = (typeof window !== 'undefined' ? localStorage.getItem('tenantSlug') : null) || 'captar'
-  const isAdminTenant = String(tenantSlug || '').toLowerCase() === 'captar'
+  const adminRootSlug = (typeof window !== 'undefined' ? localStorage.getItem('rootTenantSlug') : null) || 'captar'
+  const adminContext = (typeof window !== 'undefined' ? localStorage.getItem('adminContext') : null) === '1'
+  const isAdminTenant = adminContext || (String(adminRootSlug || '').toLowerCase() === 'captar')
   return (
     <AnimatePresence mode="wait">
       <motion.div key={location.pathname} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.25 }}>

@@ -23,8 +23,17 @@ class ApiService {
       const isLogin = String(config.url || '').includes('/auth/login')
       const hasExplicitTenant = !!(config.headers && (config.headers as any)['X-Tenant'])
       if (!isLogin) {
-        const tenant = localStorage.getItem('tenantSlug') || 'captar'
-        ;(config.headers as any)['X-Tenant'] = tenant
+        const root = localStorage.getItem('rootTenantSlug') || 'captar'
+        const adminCtx = localStorage.getItem('adminContext') === '1'
+        const cur = localStorage.getItem('tenantSlug') || 'captar'
+        const effective = (adminCtx && String(root).toLowerCase() === 'captar') ? 'captar' : cur
+        ;(config.headers as any)['X-Tenant'] = effective
+        const view = localStorage.getItem('viewTenantSlug') || ''
+        if (adminCtx && view) {
+          ;(config.headers as any)['X-View-Tenant'] = view
+        } else {
+          if ((config.headers as any)['X-View-Tenant']) delete (config.headers as any)['X-View-Tenant']
+        }
       } else if (!hasExplicitTenant && config.headers) {
         delete (config.headers as any)['X-Tenant']
       }
@@ -58,6 +67,14 @@ class ApiService {
       const rawTenant = (data?.tenantSlug ?? data?.tenant ?? data?.slug ?? data?.TenantSlug ?? data?.Tenant)
       const tenantSlug = String(rawTenant || chosenSlug)
       localStorage.setItem('tenantSlug', tenantSlug)
+      try {
+        const root = localStorage.getItem('rootTenantSlug')
+        if (!root) localStorage.setItem('rootTenantSlug', tenantSlug)
+        if (tenantSlug.toLowerCase() === 'captar') {
+          localStorage.setItem('rootTenantSlug', 'captar')
+          localStorage.setItem('adminContext', '1')
+        }
+      } catch {}
       try {
         const resTen = await this.listTenants()
         const rowsTen = resTen.rows || []
@@ -371,7 +388,16 @@ class ApiService {
 
   async getEleitores(): Promise<any[]> {
     const response = await this.api.get('/eleitores')
-    return response.data
+    const data = response.data
+    const adminCtx = (localStorage.getItem('adminContext') || '') === '1'
+    const viewSlug = (localStorage.getItem('viewTenantSlug') || '').toUpperCase()
+    const viewName = (localStorage.getItem('viewTenantName') || '').toUpperCase()
+    if (adminCtx && viewSlug) {
+      const allow = new Set([viewSlug, viewName])
+      const rows = (data.rows || []).filter((r: any) => allow.has(String(r.TenantLayer || '').toUpperCase()))
+      return { rows, columns: data.columns || [] }
+    }
+    return data
   }
 
   async createEleitor(data: any): Promise<any> {
@@ -393,7 +419,16 @@ class ApiService {
 
   async getAtivistas(): Promise<any[]> {
     const response = await this.api.get('/ativistas')
-    return response.data
+    const data = response.data
+    const adminCtx = (localStorage.getItem('adminContext') || '') === '1'
+    const viewSlug = (localStorage.getItem('viewTenantSlug') || '').toUpperCase()
+    const viewName = (localStorage.getItem('viewTenantName') || '').toUpperCase()
+    if (adminCtx && viewSlug) {
+      const allow = new Set([viewSlug, viewName])
+      const rows = (data.rows || []).filter((r: any) => allow.has(String(r.TenantLayer || '').toUpperCase()))
+      return { rows, columns: data.columns || [] }
+    }
+    return data
   }
 
   // ==================== USUÁRIOS ====================
@@ -426,9 +461,17 @@ class ApiService {
     try {
       const response = await this.api.get('/usuarios')
       const data = response.data
+      const adminCtx = (localStorage.getItem('adminContext') || '') === '1'
+      const viewSlug = (localStorage.getItem('viewTenantSlug') || '').toUpperCase()
+      const viewName = (localStorage.getItem('viewTenantName') || '').toUpperCase()
       const tenant = await getTenantInfo()
       if ((tenant.slug || '').toLowerCase() !== 'captar') {
         const rows = (data.rows || []).filter((r: any) => Number(r.IdTenant ?? r.idTenant) === Number(tenant.id))
+        return { rows, columns: data.columns || [] }
+      }
+      if (adminCtx && viewSlug) {
+        const allow = new Set([viewSlug, viewName])
+        const rows = (data.rows || []).filter((r: any) => allow.has(String(r.TenantLayer || '').toUpperCase()))
         return { rows, columns: data.columns || [] }
       }
       return data
@@ -436,9 +479,17 @@ class ApiService {
       const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
       const response = await fb.get('/usuarios')
       const data = response.data
+      const adminCtx = (localStorage.getItem('adminContext') || '') === '1'
+      const viewSlug = (localStorage.getItem('viewTenantSlug') || '').toUpperCase()
+      const viewName = (localStorage.getItem('viewTenantName') || '').toUpperCase()
       const tenant = await getTenantInfo()
       if ((tenant.slug || '').toLowerCase() !== 'captar') {
         const rows = (data.rows || []).filter((r: any) => Number(r.IdTenant ?? r.idTenant) === Number(tenant.id))
+        return { rows, columns: data.columns || [] }
+      }
+      if (adminCtx && viewSlug) {
+        const allow = new Set([viewSlug, viewName])
+        const rows = (data.rows || []).filter((r: any) => allow.has(String(r.TenantLayer || '').toUpperCase()))
         return { rows, columns: data.columns || [] }
       }
       return data
@@ -491,13 +542,26 @@ class ApiService {
   // ==================== DASHBOARD ====================
 
   async getDashboardStats(): Promise<any> {
-    const response = await this.api.get('/dashboard/stats')
+    const adminCtx = (localStorage.getItem('adminContext') || '') === '1'
+    const viewSlug = (localStorage.getItem('viewTenantSlug') || '').trim()
+    const hdrs: Record<string, string> = {}
+    if (adminCtx && viewSlug) hdrs['X-View-Tenant'] = viewSlug
+    const response = await this.api.get('/dashboard/stats', { headers: hdrs })
     const data = response.data || {}
     try {
-      const slug = localStorage.getItem('tenantSlug') || 'captar'
-      if (slug.toLowerCase() !== 'captar') {
+      const slug = (localStorage.getItem('tenantSlug') || 'captar').toLowerCase()
+      if (slug !== 'captar') {
         const users = await this.listUsuarios()
         data.total_usuarios = (users.rows || []).length
+      } else if (adminCtx && viewSlug) {
+        const users = await this.listUsuarios()
+        data.total_usuarios = (users.rows || []).length
+        try {
+          const eleitores = await this.getEleitores()
+          data.total_eleitores = (eleitores.rows || eleitores || []).length
+          const ativistas = await this.getAtivistas()
+          data.total_ativistas = (ativistas.rows || ativistas || []).length
+        } catch {}
       }
     } catch {}
     return data

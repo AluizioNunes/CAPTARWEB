@@ -11,7 +11,8 @@
     "type-check": "tsc --noEmit",
     "smoke": "powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1",
     "smoke:dev": "powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 -IncludeDev",
-    "smoke:full": "powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 -IncludeDev -TenantChecks"
+    "smoke:full": "powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 -IncludeDev -TenantChecks",
+    "test:frontends": "powershell -ExecutionPolicy Bypass -File scripts/test-frontends.ps1"
   },
   "dependencies": {
     "@ant-design/icons": "^5.3.7",

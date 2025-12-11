@@ -38,6 +38,8 @@ services:
     env_file:
       - .env.docker
     environment: {}
+    ports:
+      - "${FASTAPI_HOST_PORT:-8000}:8000"
     expose:
       - "8000"
     depends_on:

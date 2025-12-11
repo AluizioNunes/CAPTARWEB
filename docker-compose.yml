@@ -171,8 +171,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      n8n_db_init:
-        condition: service_completed_successfully
     networks:
       - captar-network
     restart: unless-stopped
@@ -225,6 +223,8 @@ services:
   n8n_db_init:
     image: postgres:18-alpine
     container_name: captar-n8n-db-init
+    profiles:
+      - init
     depends_on:
       postgres:
         condition: service_healthy

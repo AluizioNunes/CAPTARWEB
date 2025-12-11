@@ -15,6 +15,7 @@ services:
       - "5440:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
     networks:
       - captar-network
     healthcheck:
@@ -195,7 +196,7 @@ services:
       TZ: ${TZ:-America/Manaus}
       DATABASE_ENABLED: "true"
       DATABASE_PROVIDER: postgresql
-      DATABASE_CONNECTION_URI: "postgresql://${DB_USER:-captar}:${DB_PASSWORD:-captar}@postgres:5432/${DB_NAME:-captar}?schema=${DB_SCHEMA:-public}"
+      DATABASE_CONNECTION_URI: "postgresql://${DB_USER:-captar}:${DB_PASSWORD:-captar}@${EV_DB_HOST:-postgres}:${EV_DB_PORT:-5432}/${DB_NAME:-captar}?schema=EvolutionAPI"
       DATABASE_CONNECTION_CLIENT_NAME: evolution_exchange
       DATABASE_SAVE_DATA_INSTANCE: "true"
       DATABASE_SAVE_DATA_NEW_MESSAGE: "true"

@@ -166,6 +166,8 @@ services:
       DB_POSTGRESDB_USER: ${DB_USER:-captar}
       DB_POSTGRESDB_PASSWORD: ${DB_PASSWORD:-captar}
       DB_POSTGRESDB_SCHEMA: n8n
+      N8N_SECURE_COOKIE: "false"
+      N8N_SESSION_COOKIE_SAMESITE: "lax"
     ports:
       - "5678:5678"
     volumes:
@@ -187,7 +189,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:4000:4000"
     volumes:
       - evolution_instances:/evolution/instances
     networks:
@@ -210,17 +212,18 @@ services:
       CACHE_REDIS_PREFIX_KEY: evolution
       CACHE_REDIS_SAVE_INSTANCES: "false"
       CACHE_LOCAL_ENABLED: "false"
+      SERVER_PORT: "4000"
     expose:
-      - "8080"
+      - "4000"
 
   evolution_frontend:
     image: evoapicloud/evolution-manager:latest
     container_name: evolution_frontend
     restart: always
     ports:
-      - "${EV_FRONTEND_HOST_PORT:-3000}:80"
+      - "${EV_FRONTEND_HOST_PORT:-4100}:80"
     volumes:
-      - ./evolution-nginx:/etc/nginx/conf.d:ro
+      - ./evolution-nginx/nginx.conf:/etc/nginx/conf.d/nginx.conf:ro
     networks:
       - captar-network
 

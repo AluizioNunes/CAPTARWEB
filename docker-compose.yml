@@ -221,9 +221,10 @@ services:
     container_name: evolution_frontend
     restart: always
     ports:
-      - "${EV_FRONTEND_HOST_PORT:-4100}:80"
+      - "${EV_FRONTEND_HOST_PORT:-4380}:80"
     volumes:
-      - ./evmanager-conf/nginx.conf:/etc/nginx/conf.d/nginx.conf:ro
+      - ./evmanager-conf:/opt/conf:ro
+    command: ["/bin/sh", "-c", "cp /opt/conf/nginx.conf /etc/nginx/conf.d/nginx.conf && /bin/sh /start.sh"]
     networks:
       - captar-network
 

@@ -78,8 +78,14 @@ if [ -f /etc/nginx/nginx.conf ]; then
 fi
 
 # Verificar configuração antes de iniciar
-if ! nginx -t 2>/dev/null; then
-    echo "Aviso: Configuração do nginx pode ter problemas, mas tentando iniciar mesmo assim..."
+if ! nginx -t 2>&1; then
+    echo "ERRO: Configuração do nginx inválida!"
+    # Tentar usar arquivo de fallback se disponível
+    if [ -f /opt/conf/default.conf ]; then
+        echo "Tentando usar configuração de fallback..."
+        cp /opt/conf/default.conf /etc/nginx/conf.d/default.conf 2>/dev/null || true
+        nginx -t 2>&1 || true
+    fi
 fi
 
 # Iniciar nginx

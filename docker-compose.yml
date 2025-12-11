@@ -38,6 +38,8 @@ services:
     env_file:
       - .env.docker
     environment: {}
+    ports:
+      - "${FASTAPI_HOST_PORT:-8000}:8000"
     expose:
       - "8000"
     depends_on:
@@ -222,7 +224,7 @@ services:
       - "${EV_FRONTEND_HOST_PORT:-4380}:80"
     volumes:
       - ./evmanager-conf:/opt/conf:ro
-    entrypoint: ["/bin/sh", "/opt/conf/fix-nginx-entrypoint.sh"]
+    entrypoint: ["/bin/sh", "-c", "if [ -f /opt/conf/fix-nginx-entrypoint.sh ]; then /bin/sh /opt/conf/fix-nginx-entrypoint.sh; else exec nginx -g 'daemon off;'; fi"]
     networks:
       - captar-network
 

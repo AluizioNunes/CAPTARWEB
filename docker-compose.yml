@@ -38,8 +38,8 @@ services:
     env_file:
       - .env.docker
     environment: {}
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -73,8 +73,8 @@ services:
     networks:
       - captar-network
     restart: unless-stopped
-    ports:
-      - "55080:80"
+    expose:
+      - "80"
 
   nginx:
     image: nginx:latest

@@ -223,7 +223,7 @@ services:
     ports:
       - "${EV_FRONTEND_HOST_PORT:-4100}:80"
     volumes:
-      - ./evolution-nginx:/etc/nginx/conf.d:ro
+      - ./evmanager-conf:/etc/nginx/conf.d:ro
     networks:
       - captar-network
 

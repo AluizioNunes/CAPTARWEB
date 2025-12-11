@@ -31,7 +31,6 @@ services:
     build:
       context: ./Backend/FastAPI
       dockerfile: Dockerfile
-    image: captar-fastapi:latest
     container_name: captar-fastapi
     labels:
       - "com.captar.stack=captar"
@@ -60,7 +59,6 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_API_URL: ${VITE_API_URL:-/api}
-    image: captar-frontend:latest
     container_name: captar-frontend
     labels:
       - "com.captar.stack=captar"
@@ -100,7 +98,6 @@ services:
     build:
       context: ./Backend/NestJS
       dockerfile: Dockerfile
-    image: captar-nestjs:latest
     container_name: captar-nestjs
     labels:
       - "com.captar.stack=captar"

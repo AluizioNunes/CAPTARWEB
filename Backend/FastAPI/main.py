@@ -91,6 +91,9 @@ def get_db_connection(dsn: str | None = None):
     use_dsn = (dsn.strip() if (dsn and dsn.strip()) else f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
     conn = psycopg.connect(use_dsn)
     try:
+        # Configurar search_path para o schema captar
+        with conn.cursor() as cur:
+            cur.execute(f'SET search_path TO "{DB_SCHEMA}", public')
         yield conn
     finally:
         conn.close()

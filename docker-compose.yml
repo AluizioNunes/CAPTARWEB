@@ -37,7 +37,15 @@ services:
       - "com.captar.stack=captar"
     env_file:
       - .env.docker
-    environment: {}
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:-captar}
+      DB_USER: ${DB_USER:-captar}
+      DB_PASSWORD: ${DB_PASSWORD:-captar}
+      DB_SCHEMA: ${DB_SCHEMA:-captar}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
     ports:
       - "${FASTAPI_HOST_PORT:-8001}:8000"
     expose:

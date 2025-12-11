@@ -40,7 +40,7 @@ services:
     expose:
       - "8000"
     ports:
-      - "${FASTAPI_HOST_PORT:-8000}:8000"
+      - "${FASTAPI_HOST_PORT:-18000}:8000"
     depends_on:
       postgres:
         condition: service_healthy

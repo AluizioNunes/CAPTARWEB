@@ -222,7 +222,7 @@ services:
       - "${EV_FRONTEND_HOST_PORT:-4380}:80"
     volumes:
       - ./evmanager-conf:/opt/conf:ro
-    entrypoint: ["/bin/sh", "-c", "for f in /etc/nginx/nginx.conf /etc/nginx/conf.d/*.conf; do if [ -f \"$f\" ]; then sed -i -E 's/expires\\s+must-revalidate/expires off/g' \"$f\"; fi; done; nginx -g 'daemon off;' "]
+    entrypoint: ["/bin/sh", "-c", "for f in /etc/nginx/nginx.conf /etc/nginx/conf.d/*.conf; do [ -f \"$f\" ] && sed -i.bak -e 's/expires[[:space:]]*must-revalidate[[:space:]]*;/expires off;/g' -e 's/expires[[:space:]]*must-revalidate$/expires off;/g' -e 's/expires[[:space:]]*must-revalidate/expires off/g' \"$f\" 2>/dev/null || true; done; exec nginx -g 'daemon off;'"]
     networks:
       - captar-network
 

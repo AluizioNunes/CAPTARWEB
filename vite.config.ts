@@ -9,7 +9,7 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     server: {
-      port: 5175,
+      port: 5500,
       host: '0.0.0.0',
       strictPort: false,
       open: false,
@@ -25,6 +25,11 @@ export default defineConfig(({ mode }) => {
       hmr: {
         protocol: 'ws'
       }
+    },
+    preview: {
+      port: 5500,
+      host: '0.0.0.0',
+      strictPort: false
     },
     build: {
       outDir: 'dist',

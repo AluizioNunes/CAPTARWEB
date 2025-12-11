@@ -1,7 +1,7 @@
 import axios, { AxiosInstance } from 'axios'
 import { LoginRequest, LoginResponse, User, IntegracaoConfig } from '../types'
 
-const API_BASE_URL = '/api'
+const API_BASE_URL = (typeof import.meta !== 'undefined' && (import.meta as any).env && (import.meta as any).env.VITE_API_URL) || '/api'
 
 class ApiService {
   private api: AxiosInstance

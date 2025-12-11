@@ -40,8 +40,6 @@ services:
     environment: {}
     expose:
       - "8000"
-    ports:
-      - "${FASTAPI_HOST_PORT:-18000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -76,8 +74,6 @@ services:
     restart: unless-stopped
     expose:
       - "80"
-    ports:
-      - "${FRONTEND_HOST_PORT:-55080}:80"
 
   nginx:
     image: nginx:latest
@@ -85,7 +81,7 @@ services:
     labels:
       - "com.captar.stack=captar"
     ports:
-      - "8088:80"
+      - "5500:80"
     volumes:
       - ./nginx:/etc/nginx/conf.d:ro
     depends_on:

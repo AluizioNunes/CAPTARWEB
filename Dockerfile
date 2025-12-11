@@ -1,5 +1,5 @@
 # Build stage
-FROM node:24.11.0 AS builder
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
@@ -7,11 +7,13 @@ WORKDIR /app
 COPY package*.json ./
 COPY tsconfig*.json ./
 COPY vite.config.ts ./
-ARG VITE_API_URL
+ARG VITE_API_URL=/api
 ENV VITE_API_URL=$VITE_API_URL
+ENV CI=true
+ENV NODE_OPTIONS=--max-old-space-size=1024
 
 # Instalar dependências
-RUN npm ci
+RUN npm config set fund false && npm config set audit false && npm ci --no-audit --no-fund
 
 # Copiar o restante dos arquivos
 COPY . .

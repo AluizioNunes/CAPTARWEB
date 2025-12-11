@@ -149,10 +149,99 @@ services:
       - captar-network
     restart: unless-stopped
 
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    container_name: captar-n8n
+    environment:
+      GENERIC_TIMEZONE: ${TZ:-America/Manaus}
+      TZ: ${TZ:-America/Manaus}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_RUNNERS_ENABLED: "true"
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_DATABASE: ${DB_NAME:-captar}
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_USER: ${DB_USER:-captar}
+      DB_POSTGRESDB_PASSWORD: ${DB_PASSWORD:-captar}
+      DB_POSTGRESDB_SCHEMA: n8n
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+      n8n_db_init:
+        condition: service_completed_successfully
+    networks:
+      - captar-network
+    restart: unless-stopped
+
+  evolution_api:
+    image: evoapicloud/evolution-api:latest
+    container_name: evolution_api
+    restart: always
+    depends_on:
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - evolution_instances:/evolution/instances
+    networks:
+      - captar-network
+    environment:
+      TZ: ${TZ:-America/Manaus}
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: "postgresql://${DB_USER:-captar}:${DB_PASSWORD:-captar}@postgres:5432/${DB_NAME:-captar}?schema=${DB_SCHEMA:-public}"
+      DATABASE_CONNECTION_CLIENT_NAME: evolution_exchange
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
+      DATABASE_SAVE_MESSAGE_UPDATE: "true"
+      DATABASE_SAVE_DATA_CONTACTS: "true"
+      DATABASE_SAVE_DATA_CHATS: "true"
+      DATABASE_SAVE_DATA_LABELS: "true"
+      DATABASE_SAVE_DATA_HISTORIC: "true"
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: "redis://redis:6379/6"
+      CACHE_REDIS_PREFIX_KEY: evolution
+      CACHE_REDIS_SAVE_INSTANCES: "false"
+      CACHE_LOCAL_ENABLED: "false"
+    expose:
+      - "8080"
+
+  evolution_frontend:
+    image: evoapicloud/evolution-manager:latest
+    container_name: evolution_frontend
+    restart: always
+    ports:
+      - "3000:80"
+    networks:
+      - captar-network
+
+  n8n_db_init:
+    image: postgres:18-alpine
+    container_name: captar-n8n-db-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -lc "PGPASSWORD=${DB_PASSWORD:-captar} psql -h postgres -U ${DB_USER:-captar} -d ${DB_NAME:-captar} -c 'CREATE SCHEMA IF NOT EXISTS n8n;' && PGPASSWORD=${DB_PASSWORD:-captar} psql -h postgres -U ${DB_USER:-captar} -d ${DB_NAME:-captar} -c 'SELECT 1;' && echo 'n8n schema ensured and DB connection validated'"
+    networks:
+      - captar-network
+    restart: "no"
+
 volumes:
   postgres_data:
     driver: local
   mongo_data:
+    driver: local
+  n8n_data:
+    driver: local
+  evolution_instances:
     driver: local
 
 networks:

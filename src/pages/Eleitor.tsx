@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
-import { Table, Button, Modal, Form, Input, message, Space, Popconfirm } from 'antd'
+import { Table, Button, Modal, Form, Input, Space, Popconfirm, App as AntdApp } from 'antd'
 import { PlusOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons'
 import { useApi } from '../context/ApiContext'
 import { motion } from 'framer-motion'
 
 export default function Eleitor() {
+  const { message } = AntdApp.useApp()
   const [eleitores, setEleitores] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [isModalVisible, setIsModalVisible] = useState(false)
@@ -27,7 +28,7 @@ export default function Eleitor() {
     try {
       setLoading(true)
       const data = await api.getEleitores()
-      setEleitores(data)
+      setEleitores(Array.isArray(data) ? data : (data.rows || []))
     } catch (error) {
       message.error('Erro ao carregar eleitores')
     } finally {

@@ -224,7 +224,7 @@ services:
       - "${EV_FRONTEND_HOST_PORT:-4380}:80"
     volumes:
       - ./evmanager-conf:/opt/conf:ro
-    command: ["/bin/sh", "-c", "cp -f /opt/conf/nginx.conf /etc/nginx/conf.d/nginx.conf && nginx -g 'daemon off;' "]
+    entrypoint: ["/bin/sh", "-c", "cp -f /opt/conf/nginx.conf /etc/nginx/nginx.conf && nginx -g 'daemon off;' "]
     networks:
       - captar-network
 

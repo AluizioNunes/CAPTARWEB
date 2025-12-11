@@ -80,7 +80,7 @@ services:
     labels:
       - "com.captar.stack=captar"
     ports:
-      - "80:80"
+      - "8088:80"
     volumes:
       - ./nginx:/etc/nginx/conf.d:ro
     depends_on:

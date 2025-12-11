@@ -39,6 +39,8 @@ services:
     environment: {}
     expose:
       - "8000"
+    ports:
+      - "${FASTAPI_HOST_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -73,6 +75,8 @@ services:
     restart: unless-stopped
     expose:
       - "80"
+    ports:
+      - "${FRONTEND_HOST_PORT:-55080}:80"
 
   nginx:
     image: nginx:latest
@@ -213,7 +217,7 @@ services:
     container_name: evolution_frontend
     restart: always
     ports:
-      - "3000:80"
+      - "${EV_FRONTEND_HOST_PORT:-3000}:80"
     networks:
       - captar-network
 

@@ -219,6 +219,8 @@ services:
     restart: always
     ports:
       - "${EV_FRONTEND_HOST_PORT:-3000}:80"
+    volumes:
+      - ./evolution-nginx/nginx.conf:/etc/nginx/conf.d/nginx.conf:ro
     networks:
       - captar-network
 

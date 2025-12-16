@@ -11,6 +11,7 @@ import Consultas from './pages/Consultas'
 import Perfil from './pages/Perfil'
 import Funcoes from './pages/Funcoes'
 import Integracoes from './pages/Integracoes'
+const Disparos = lazy(() => import('./pages/Automacao/Disparos'))
 import Metas from './pages/Metas'
 import Eleicoes from './pages/Eleicoes'
 import Candidatos from './pages/Candidatos'
@@ -26,7 +27,6 @@ const { Content } = Layout
 function AppRoutes() {
   const { isAuthenticated } = useAuthStore()
   const location = useLocation()
-  const tenantSlug = (typeof window !== 'undefined' ? localStorage.getItem('tenantSlug') : null) || 'captar'
   const adminRootSlug = (typeof window !== 'undefined' ? localStorage.getItem('rootTenantSlug') : null) || 'captar'
   const adminContext = (typeof window !== 'undefined' ? localStorage.getItem('adminContext') : null) === '1'
   const isAdminTenant = adminContext || (String(adminRootSlug || '').toLowerCase() === 'captar')
@@ -52,6 +52,11 @@ function AppRoutes() {
             </Suspense>
           ) : <Navigate to="/login" />} />
           <Route path="/consultas" element={isAuthenticated ? <Consultas /> : <Navigate to="/login" />} />
+          <Route path="/automacao/disparos" element={isAuthenticated ? (
+            <Suspense fallback={<div style={{ padding: 24 }}>Carregando...</div>}>
+              <Disparos />
+            </Suspense>
+          ) : <Navigate to="/login" />} />
           <Route path="/integracoes" element={isAuthenticated ? <Integracoes /> : <Navigate to="/login" />} />
           <Route path="/parametros/metas" element={isAuthenticated ? <Metas /> : <Navigate to="/login" />} />
           <Route path="/parametros/tenants" element={isAuthenticated && isAdminTenant ? (

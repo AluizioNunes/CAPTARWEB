@@ -80,6 +80,7 @@ export default function MetaModal({ open, initial, onCancel, onSaved }: Props) {
         </Space>
         <Form.Item name="IdCandidato" label="Candidato" rules={[{ required: true }]}>
           <Select placeholder="Selecione" options={(candidatos || []).map((c: any) => ({ label: String(c.Nome || c.nome), value: Number(c.IdCandidato || c.idCandidato), extra: c }))} onChange={(val, opt: any) => {
+            void val
             const extra = (opt as any)?.extra || {}
             form.setFieldsValue({ Numero: extra.Numero || extra.numero || undefined, Partido: extra.Partido || extra.partido || undefined, Cargo: extra.Cargo || extra.cargo || undefined })
           }} />

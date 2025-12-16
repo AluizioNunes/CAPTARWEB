@@ -91,12 +91,29 @@ def get_db_connection(dsn: str | None = None):
     use_dsn = (dsn.strip() if (dsn and dsn.strip()) else f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
     conn = psycopg.connect(use_dsn)
     try:
-        # Configurar search_path para o schema captar
+        prev_autocommit = conn.autocommit
+        conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute(f'SET search_path TO "{DB_SCHEMA}", public')
+        conn.autocommit = prev_autocommit
         yield conn
+        try:
+            if not conn.autocommit:
+                conn.commit()
+        except Exception:
+            pass
+    except Exception:
+        try:
+            if not conn.autocommit:
+                conn.rollback()
+        except Exception:
+            pass
+        raise
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 _DSN_CACHE: Dict[str, Tuple[str, float]] = {}
 _DSN_TTL_SECONDS = 300
@@ -355,6 +372,10 @@ async def tenants_migrate_data(body: MigrateDataRequest):
 def apply_migrations():
     actions = []
     with get_db_connection() as conn:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         conn.autocommit = True
         cur = conn.cursor()
         try:
@@ -370,6 +391,23 @@ def apply_migrations():
         try:
             cur.execute(f'DROP TABLE IF EXISTS "{DB_SCHEMA}"."usuarios" CASCADE')
             actions.append('Dropped legacy table "captar"."usuarios" (lowercase, quoted)')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Tenant" (
+                    "IdTenant" SERIAL PRIMARY KEY,
+                    "Nome" VARCHAR(120) NOT NULL,
+                    "Slug" VARCHAR(80) NOT NULL UNIQUE,
+                    "Status" VARCHAR(40),
+                    "Plano" VARCHAR(40),
+                    "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                    "DataUpdate" TIMESTAMP
+                )
+                """
+            )
+            actions.append('Tenant created')
         except Exception:
             pass
         try:
@@ -392,6 +430,47 @@ def apply_migrations():
                 """
             )
             actions.append('Usuarios created')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.eleitores (
+                    id SERIAL PRIMARY KEY,
+                    nome VARCHAR(255),
+                    cpf VARCHAR(14),
+                    celular VARCHAR(20),
+                    bairro VARCHAR(120),
+                    zona_eleitoral VARCHAR(120),
+                    criado_por INT REFERENCES "{DB_SCHEMA}"."Usuarios"("IdUsuario"),
+                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant"),
+                    "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                    "DataUpdate" TIMESTAMP,
+                    "TipoUpdate" VARCHAR(20),
+                    "UsuarioUpdate" VARCHAR(100)
+                )
+                """
+            )
+            actions.append('eleitores created')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.ativistas (
+                    id SERIAL PRIMARY KEY,
+                    nome VARCHAR(255),
+                    tipo_apoio VARCHAR(120),
+                    criado_por INT REFERENCES "{DB_SCHEMA}"."Usuarios"("IdUsuario"),
+                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant"),
+                    "DataCadastro" TIMESTAMP DEFAULT NOW(),
+                    "DataUpdate" TIMESTAMP,
+                    "TipoUpdate" VARCHAR(20),
+                    "UsuarioUpdate" VARCHAR(100)
+                )
+                """
+            )
+            actions.append('ativistas created')
         except Exception:
             pass
         # legacy schema.sql execution removed to avoid recreating lowercase 'usuarios'
@@ -855,6 +934,10 @@ def apply_migrations():
 def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):
     actions = []
     with get_db_connection(dsn) as conn:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         conn.autocommit = True
         cur = conn.cursor()
         try:
@@ -1258,6 +1341,10 @@ async def admin_migrate():
 async def admin_ensure_eleitores_ativistas():
     try:
         with get_db_connection() as conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             conn.autocommit = True
             cur = conn.cursor()
             try:
@@ -1331,6 +1418,10 @@ async def admin_migrate_all_tenants():
 async def admin_ensure_usuarios():
     try:
         with get_db_connection() as conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             conn.autocommit = True
             cur = conn.cursor()
             try:
@@ -2642,6 +2733,11 @@ async def dashboard_stats(request: Request = None):
             except Exception:
                 pass
         with get_db_connection() as conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            conn.autocommit = True
             cursor = conn.cursor()
             tid = _tenant_id_from_header(request) if request else 1
             s = str(slug or '').lower()

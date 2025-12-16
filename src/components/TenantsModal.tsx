@@ -60,11 +60,22 @@ export default function TenantsModal({ open, initial, onCancel, onSaved }: Props
       const values = await form.validateFields()
       if (initial?.IdTenant) {
         await api.updateTenant(initial.IdTenant, values)
-        const row = { ...initial, ...values }
+        const row = { ...initial, ...values, __db__: !!initial?.Dsn, __db_created_at__: initial?.DbCreatedAt || '' , __new__: false }
         onSaved(row)
       } else {
         const res = await api.createTenant(values)
-        const row = { IdTenant: res.id, Nome: values.Nome, Slug: values.Slug, Status: values.Status ?? 'ATIVO', Plano: values.Plano ?? 'PADRAO' }
+        const id = res.id
+        const nome = values.Nome
+        const slug = String(values.Slug || '').toLowerCase()
+        const db_name = `captar_t${String(id).padStart(2,'0')}_${slug}`
+        let dsn = ''
+        try {
+          const prov = await api.provisionTenant({ nome, slug, db_name, db_host: 'postgres', db_port: '5432', db_user: 'captar', db_password: 'captar' })
+          dsn = String(prov?.dsn || '')
+          if (dsn) { await api.setTenantDsn(slug, dsn).catch(() => {}) }
+          await api.migrateTenantData(slug).catch(() => {})
+        } catch {}
+        const row = { IdTenant: id, Nome: nome, Slug: values.Slug, Status: values.Status ?? 'ATIVO', Plano: values.Plano ?? 'PADRAO', Dsn: dsn, __db__: !!dsn, __db_created_at__: dsn ? new Date().toISOString() : '', __new__: true }
         onSaved(row)
       }
     } catch {}
@@ -135,4 +146,3 @@ export default function TenantsModal({ open, initial, onCancel, onSaved }: Props
     </Modal>
   )
 }
-

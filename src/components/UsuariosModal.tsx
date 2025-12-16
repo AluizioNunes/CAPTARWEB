@@ -20,8 +20,6 @@ export default function UsuariosModal({ open, initial, onCancel, onSaved }: Prop
   const [schemaBaseNames, setSchemaBaseNames] = useState<string[]>([])
   const [perfilOptions, setPerfilOptions] = useState<{ value: string; label: string }[]>([])
   const [funcaoOptions, setFuncaoOptions] = useState<{ value: string; label: string }[]>([])
-  const [perfilMap, setPerfilMap] = useState<Record<string, number>>({})
-  const [funcaoMap, setFuncaoMap] = useState<Record<string, number>>({})
   const [coordenadores, setCoordenadores] = useState<{ value: string; label: string }[]>([])
   const [supervisores, setSupervisores] = useState<{ value: string; label: string }[]>([])
   const [coordTenantMap, setCoordTenantMap] = useState<Record<string, string>>({})
@@ -149,14 +147,7 @@ export default function UsuariosModal({ open, initial, onCancel, onSaved }: Prop
         const res = await api.listPerfil()
         const rows = res.rows || []
         const opts = rows.map((r: any) => ({ label: r.Perfil ?? r.perfil, value: String(r.Perfil ?? r.perfil) }))
-        const idx: Record<string, number> = {}
-        for (const r of rows) {
-          const label = r.Perfil ?? r.perfil
-          const id = r.IdPerfil ?? r.id ?? r.Id ?? r.ID
-          if (label !== undefined && id !== undefined) idx[String(label)] = Number(id)
-        }
         setPerfilOptions(opts)
-        setPerfilMap(idx)
       } catch {}
     }
     const loadFuncoes = async () => {
@@ -164,14 +155,7 @@ export default function UsuariosModal({ open, initial, onCancel, onSaved }: Prop
         const res = await api.listFuncoes()
         const rows = res.rows || []
         const opts = rows.map((r: any) => ({ label: r.Funcao ?? r.Descricao ?? '', value: String(r.Funcao ?? r.Descricao ?? '') }))
-        const idx: Record<string, number> = {}
-        for (const r of rows) {
-          const label = r.Funcao ?? r.Descricao ?? ''
-          const id = r.IdFuncao ?? r.id ?? r.Id ?? r.ID
-          if (label !== undefined && id !== undefined) idx[String(label)] = Number(id)
-        }
         setFuncaoOptions(opts)
-        setFuncaoMap(idx)
       } catch {}
     }
     const loadCoordenadores = async () => {

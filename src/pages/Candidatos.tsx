@@ -9,7 +9,6 @@ export default function Candidatos() {
   const { message } = App.useApp()
   const [loading, setLoading] = useState(false)
   const [rows, setRows] = useState<any[]>([])
-  const [cols, setCols] = useState<string[]>([])
   const [open, setOpen] = useState(false)
   const [form] = Form.useForm()
   const [foto, setFoto] = useState<string>('')
@@ -19,7 +18,6 @@ export default function Candidatos() {
       setLoading(true)
       const res = await api.listCandidatos()
       setRows(res.rows || [])
-      setCols(res.columns || [])
     } catch {
       message.error('Erro ao carregar candidatos')
     } finally {

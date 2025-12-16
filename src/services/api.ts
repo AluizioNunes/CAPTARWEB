@@ -1,6 +1,40 @@
 import axios, { AxiosInstance } from 'axios'
 import { LoginRequest, LoginResponse, User, IntegracaoConfig } from '../types'
 
+export interface ApiResponse<T> {
+  rows: T[]
+  columns: string[]
+}
+
+export interface Eleitor {
+  id: number
+  nome: string
+  cpf?: string
+  celular?: string
+  bairro?: string
+  zona_eleitoral?: string
+  criado_por?: number
+  IdTenant?: number
+  TenantLayer?: string
+  DataCadastro?: string
+  DataUpdate?: string
+  TipoUpdate?: string
+  UsuarioUpdate?: string
+}
+
+export interface Ativista {
+  id: number
+  nome: string
+  tipo_apoio?: string
+  criado_por?: number
+  IdTenant?: number
+  TenantLayer?: string
+  DataCadastro?: string
+  DataUpdate?: string
+  TipoUpdate?: string
+  UsuarioUpdate?: string
+}
+
 const API_BASE_URL = (typeof import.meta !== 'undefined' && (import.meta as any).env && (import.meta as any).env.VITE_API_URL) || '/api'
 
 class ApiService {
@@ -131,11 +165,11 @@ class ApiService {
         return { ok: !!resp2.data }
       } catch (e2: any) {
         try {
-          const fb = axios.create({ baseURL: 'http://localhost:8000', headers: { 'Content-Type': 'application/json' } })
+          const fb = axios.create({ baseURL: 'http://localhost:8001', headers: { 'Content-Type': 'application/json' } })
           const resp3 = await fb.get('/api/health/db')
           return resp3.data
         } catch (e3: any) {
-          const fb2 = axios.create({ baseURL: 'http://localhost:8000', headers: { 'Content-Type': 'application/json' } })
+          const fb2 = axios.create({ baseURL: 'http://localhost:8001', headers: { 'Content-Type': 'application/json' } })
           const resp4 = await fb2.get('/health')
           return { ok: !!resp4.data }
         }
@@ -184,7 +218,7 @@ class ApiService {
       const response = await this.api.get('/perfil/schema')
       return response.data
     } catch (e: any) {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
       const response = await fb.get('/perfil/schema')
       return response.data
     }
@@ -194,7 +228,7 @@ class ApiService {
     const currentSlug = (localStorage.getItem('tenantSlug') || 'captar').toLowerCase()
     // fetch current tenant
     const cur = await this.api.get('/perfil').then(r => r.data).catch(async () => {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
       return (await fb.get('/perfil')).data
     })
     if (currentSlug === 'captar') return cur
@@ -204,7 +238,7 @@ class ApiService {
     if (token) hdr['Authorization'] = `Bearer ${token}`
     const alt = axios.create({ baseURL: API_BASE_URL, headers: hdr })
     const cap = await alt.get('/perfil').then(r => r.data).catch(async () => {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: hdr })
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: hdr })
       return (await fb.get('/perfil')).data
     })
     const rowsCur = cur.rows || []
@@ -260,7 +294,7 @@ class ApiService {
   async listFuncoes(): Promise<{ rows: any[]; columns: string[] }> {
     const currentSlug = (localStorage.getItem('tenantSlug') || 'captar').toLowerCase()
     const cur = await this.api.get('/funcoes').then(r => r.data).catch(async () => {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
       return (await fb.get('/funcoes')).data
     })
     if (currentSlug === 'captar') return cur
@@ -269,7 +303,7 @@ class ApiService {
     if (token) hdr['Authorization'] = `Bearer ${token}`
     const alt = axios.create({ baseURL: API_BASE_URL, headers: hdr })
     const cap = await alt.get('/funcoes').then(r => r.data).catch(async () => {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: hdr })
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: hdr })
       return (await fb.get('/funcoes')).data
     })
     const rowsCur = cur.rows || []
@@ -386,18 +420,35 @@ class ApiService {
 
   // ==================== ELEITORES ====================
 
-  async getEleitores(): Promise<any[]> {
-    const response = await this.api.get('/eleitores')
-    const data = response.data
-    const adminCtx = (localStorage.getItem('adminContext') || '') === '1'
-    const viewSlug = (localStorage.getItem('viewTenantSlug') || '').toUpperCase()
-    const viewName = (localStorage.getItem('viewTenantName') || '').toUpperCase()
-    if (adminCtx && viewSlug) {
-      const allow = new Set([viewSlug, viewName])
-      const rows = (data.rows || []).filter((r: any) => allow.has(String(r.TenantLayer || '').toUpperCase()))
-      return { rows, columns: data.columns || [] }
+  async getEleitores(): Promise<ApiResponse<Eleitor>> {
+    try {
+      const response = await this.api.get('/eleitores')
+      const data = response.data
+      const rows: Eleitor[] = Array.isArray(data) ? (data as Eleitor[]) : ((data.rows || []) as Eleitor[])
+      const adminCtx = (localStorage.getItem('adminContext') || '') === '1'
+      const viewSlug = (localStorage.getItem('viewTenantSlug') || '').toUpperCase()
+      const viewName = (localStorage.getItem('viewTenantName') || '').toUpperCase()
+      if (adminCtx && viewSlug) {
+        const allow = new Set([viewSlug, viewName])
+        const filtered = rows.filter((r: Eleitor) => allow.has(String((r as any).TenantLayer || '').toUpperCase()))
+        return { rows: filtered, columns: Array.isArray(data) ? [] : (data.columns || []) }
+      }
+      return { rows, columns: Array.isArray(data) ? [] : (data.columns || []) }
+    } catch (e: any) {
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
+      const response = await fb.get('/eleitores')
+      const data = response.data
+      const rows: Eleitor[] = Array.isArray(data) ? (data as Eleitor[]) : ((data.rows || []) as Eleitor[])
+      const adminCtx = (localStorage.getItem('adminContext') || '') === '1'
+      const viewSlug = (localStorage.getItem('viewTenantSlug') || '').toUpperCase()
+      const viewName = (localStorage.getItem('viewTenantName') || '').toUpperCase()
+      if (adminCtx && viewSlug) {
+        const allow = new Set([viewSlug, viewName])
+        const filtered = rows.filter((r: Eleitor) => allow.has(String((r as any).TenantLayer || '').toUpperCase()))
+        return { rows: filtered, columns: Array.isArray(data) ? [] : (data.columns || []) }
+      }
+      return { rows, columns: Array.isArray(data) ? [] : (data.columns || []) }
     }
-    return data
   }
 
   async createEleitor(data: any): Promise<any> {
@@ -417,18 +468,19 @@ class ApiService {
 
   // ==================== ATIVISTAS ====================
 
-  async getAtivistas(): Promise<any[]> {
+  async getAtivistas(): Promise<ApiResponse<Ativista>> {
     const response = await this.api.get('/ativistas')
     const data = response.data
+    const rows: Ativista[] = Array.isArray(data) ? (data as Ativista[]) : ((data.rows || []) as Ativista[])
     const adminCtx = (localStorage.getItem('adminContext') || '') === '1'
     const viewSlug = (localStorage.getItem('viewTenantSlug') || '').toUpperCase()
     const viewName = (localStorage.getItem('viewTenantName') || '').toUpperCase()
     if (adminCtx && viewSlug) {
       const allow = new Set([viewSlug, viewName])
-      const rows = (data.rows || []).filter((r: any) => allow.has(String(r.TenantLayer || '').toUpperCase()))
-      return { rows, columns: data.columns || [] }
+      const filtered = rows.filter((r: Ativista) => allow.has(String((r as any).TenantLayer || '').toUpperCase()))
+      return { rows: filtered, columns: Array.isArray(data) ? [] : (data.columns || []) }
     }
-    return data
+    return { rows, columns: Array.isArray(data) ? [] : (data.columns || []) }
   }
 
   async listCandidatos(): Promise<{ rows: any[]; columns: string[] }> {
@@ -497,7 +549,7 @@ class ApiService {
       const response = await this.api.get('/usuarios/schema')
       return response.data
     } catch (e: any) {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
       const response = await fb.get('/usuarios/schema')
       return response.data
     }
@@ -536,7 +588,7 @@ class ApiService {
       }
       return data
     } catch (e: any) {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
       const response = await fb.get('/usuarios')
       const data = response.data
       const adminCtx = (localStorage.getItem('adminContext') || '') === '1'
@@ -561,7 +613,7 @@ class ApiService {
       const response = await this.api.post('/usuarios', payload)
       return response.data
     } catch (e: any) {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
       const response = await fb.post('/usuarios', payload)
       return response.data
     }
@@ -572,7 +624,7 @@ class ApiService {
       const response = await this.api.put(`/usuarios/${id}`, data)
       return response.data
     } catch (e: any) {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
       const response = await fb.put(`/usuarios/${id}`, data)
       return response.data
     }
@@ -593,7 +645,7 @@ class ApiService {
       const response = await this.api.delete(`/usuarios/${id}`)
       return response.data
     } catch (e: any) {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
       const response = await fb.delete(`/usuarios/${id}`)
       return response.data
     }
@@ -669,28 +721,88 @@ class ApiService {
   
   // ==================== TENANTS ====================
   async getTenantsSchema(): Promise<{ columns: { name: string; type: string; nullable: boolean }[] }> {
-    const response = await this.api.get('/tenants/schema')
-    return response.data
+    try {
+      const response = await this.api.get('/tenants/schema')
+      return response.data
+    } catch (e1: any) {
+      try {
+        const response = await this.api.get('/tenants/schema', { baseURL: 'http://localhost:8001/api' })
+        return response.data
+      } catch (e3: any) {
+        const origin = typeof window !== 'undefined' ? window.location.origin : ''
+        const base = origin ? `${origin}/api` : 'http://localhost:8001/api'
+        const response = await this.api.get('/tenants/schema', { baseURL: base })
+        return response.data
+      }
+    }
   }
 
   async listTenants(): Promise<{ rows: any[]; columns: string[] }> {
-    const response = await this.api.get('/tenants')
-    return response.data
+    try {
+      const response = await this.api.get('/tenants')
+      return response.data
+    } catch (e1: any) {
+      try {
+        const response = await this.api.get('/tenants', { baseURL: 'http://localhost:8001/api' })
+        return response.data
+      } catch (e3: any) {
+        const origin = typeof window !== 'undefined' ? window.location.origin : ''
+        const base = origin ? `${origin}/api` : 'http://localhost:8001/api'
+        const response = await this.api.get('/tenants', { baseURL: base })
+        return response.data
+      }
+    }
   }
 
   async createTenant(payload: any): Promise<{ id: number }> {
-    const response = await this.api.post('/tenants', payload)
-    return response.data
+    try {
+      const response = await this.api.post('/tenants', payload)
+      return response.data
+    } catch (e1: any) {
+      try {
+        const response = await this.api.post('/tenants', payload, { baseURL: 'http://localhost:8001/api' })
+        return response.data
+      } catch (e2: any) {
+        const origin = typeof window !== 'undefined' ? window.location.origin : ''
+        const base = origin ? `${origin}/api` : 'http://localhost:8001/api'
+        const response = await this.api.post('/tenants', payload, { baseURL: base })
+        return response.data
+      }
+    }
   }
 
   async updateTenant(id: number, payload: any): Promise<{ id: number }> {
-    const response = await this.api.put(`/tenants/${id}`, payload)
-    return response.data
+    try {
+      const response = await this.api.put(`/tenants/${id}`, payload)
+      return response.data
+    } catch (e1: any) {
+      try {
+        const response = await this.api.put(`/tenants/${id}`, payload, { baseURL: 'http://localhost:8001/api' })
+        return response.data
+      } catch (e2: any) {
+        const origin = typeof window !== 'undefined' ? window.location.origin : ''
+        const base = origin ? `${origin}/api` : 'http://localhost:8001/api'
+        const response = await this.api.put(`/tenants/${id}`, payload, { baseURL: base })
+        return response.data
+      }
+    }
   }
 
   async deleteTenant(id: number): Promise<{ deleted: boolean }> {
-    const response = await this.api.delete(`/tenants/${id}`)
-    return response.data
+    try {
+      const response = await this.api.delete(`/tenants/${id}`)
+      return response.data
+    } catch (e1: any) {
+      try {
+        const response = await this.api.delete(`/tenants/${id}`, { baseURL: 'http://localhost:8001/api' })
+        return response.data
+      } catch (e2: any) {
+        const origin = typeof window !== 'undefined' ? window.location.origin : ''
+        const base = origin ? `${origin}/api` : 'http://localhost:8001/api'
+        const response = await this.api.delete(`/tenants/${id}`, { baseURL: base })
+        return response.data
+      }
+    }
   }
 
   async deleteTenantAndDb(slug: string): Promise<{ ok: boolean; deleted: number; dropped: string }> {
@@ -698,7 +810,7 @@ class ApiService {
       const response = await this.api.delete('/tenants/delete_all', { data: { slug } })
       return response.data
     } catch (e: any) {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
       const response = await fb.delete('/tenants/delete_all', { data: { slug } })
       return response.data
     }
@@ -710,7 +822,7 @@ class ApiService {
       const response = await this.api.post('/tenants/provision', body)
       return response.data
     } catch (e: any) {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
       const response = await fb.post('/tenants/provision', body)
       return response.data
     }
@@ -718,12 +830,18 @@ class ApiService {
 
   async recreateTenantDb(slug: string): Promise<{ ok: boolean; idTenant: number; dsn: string; actions: string[] }> {
     try {
-      const response = await this.api.post('/tenants/recreate_db', { slug })
+      const response = await this.api.post(`/tenants/${slug}/recreate_db`)
       return response.data
-    } catch (e: any) {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
-      const response = await fb.post('/tenants/recreate_db', { slug })
-      return response.data
+    } catch (e1: any) {
+      try {
+        const response = await this.api.post(`/tenants/${slug}/recreate_db`, undefined, { baseURL: 'http://localhost:8001/api' })
+        return response.data
+      } catch (e2: any) {
+        const origin = typeof window !== 'undefined' ? window.location.origin : ''
+        const base = origin ? `${origin}/api` : 'http://localhost:8001/api'
+        const response = await this.api.post(`/tenants/${slug}/recreate_db`, undefined, { baseURL: base })
+        return response.data
+      }
     }
   }
 
@@ -732,7 +850,7 @@ class ApiService {
       const response = await this.api.post(`/tenants/${slug}/set_dsn`, { dsn })
       return response.data
     } catch (e: any) {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
       const response = await fb.post(`/tenants/${slug}/set_dsn`, { dsn })
       return response.data
     }
@@ -743,7 +861,7 @@ class ApiService {
       const response = await this.api.post('/admin/migrate_all_tenants')
       return response.data
     } catch (e: any) {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
       const response = await fb.post('/admin/migrate_all_tenants')
       return response.data
     }
@@ -754,7 +872,7 @@ class ApiService {
       const response = await this.api.post('/tenants/migrate_data', { slug })
       return response.data
     } catch (e: any) {
-      const fb = axios.create({ baseURL: 'http://localhost:8000/api', headers: { 'Content-Type': 'application/json' } })
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
       const response = await fb.post('/tenants/migrate_data', { slug })
       return response.data
     }

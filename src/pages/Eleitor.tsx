@@ -28,7 +28,7 @@ export default function Eleitor() {
     try {
       setLoading(true)
       const data = await api.getEleitores()
-      setEleitores(Array.isArray(data) ? data : (data.rows || []))
+      setEleitores(data.rows || [])
     } catch (error) {
       message.error('Erro ao carregar eleitores')
     } finally {

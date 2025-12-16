@@ -1,7 +1,7 @@
 import React from 'react'
 import { Layout, Button, Dropdown, Avatar, Menu } from 'antd'
 import Logo from '../images/CAPTAR LOGO OFICIAL.jpg'
-import { LogoutOutlined, UserOutlined, DownOutlined, DashboardOutlined, TeamOutlined, FileTextOutlined, SettingOutlined, ApiOutlined } from '@ant-design/icons'
+import { LogoutOutlined, UserOutlined, DownOutlined, DashboardOutlined, TeamOutlined, FileTextOutlined, SettingOutlined, ApiOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useEffect, useMemo, useState } from 'react'
 import { useAuthStore } from '../store/authStore'
@@ -108,6 +108,14 @@ function Navbar() {
         { key: '/funcoes', icon: <UserOutlined />, label: 'FUNÇÕES', onClick: () => navigate('/funcoes') },
         { key: '/permissoes', icon: <FileTextOutlined />, label: 'PERMISSÕES', onClick: () => navigate('/permissoes') },
         { key: '/integracoes', icon: <ApiOutlined />, label: 'INTEGRAÇÕES', onClick: () => navigate('/integracoes') },
+      ],
+    },
+    {
+      key: 'automacao',
+      icon: <ThunderboltOutlined />,
+      label: 'AUTOMAÇÃO',
+      children: [
+        { key: '/automacao/disparos', icon: <ApiOutlined />, label: 'DISPAROS', onClick: () => navigate('/automacao/disparos') },
       ],
     },
     {

@@ -17,7 +17,6 @@ export default function Dashboard() {
   const topAtivistasRef = useRef<HTMLDivElement | null>(null)
   const eleitoresZonaRef = useRef<HTMLDivElement | null>(null)
   const ativistasFuncaoRef = useRef<HTMLDivElement | null>(null)
-  const tenantsKpiRef = useRef<HTMLDivElement | null>(null)
   const [topUsuarios, setTopUsuarios] = useState<{ name: string; value: number }[]>([])
   const [topAtivistas, setTopAtivistas] = useState<{ name: string; value: number }[]>([])
   const [tenantsCount, setTenantsCount] = useState<number>(0)
@@ -84,6 +83,7 @@ export default function Dashboard() {
       window.addEventListener('resize', r)
       return () => { window.removeEventListener('resize', r); chart.dispose() }
     }
+    return () => {}
   }, [topUsuarios])
 
   useEffect(() => {
@@ -98,6 +98,7 @@ export default function Dashboard() {
       window.addEventListener('resize', r)
       return () => { window.removeEventListener('resize', r); chart.dispose() }
     }
+    return () => {}
   }, [topAtivistas])
 
   useEffect(() => {
@@ -114,6 +115,7 @@ export default function Dashboard() {
       window.addEventListener('resize', r)
       return () => { window.removeEventListener('resize', r); chart.dispose() }
     }
+    return () => {}
   }, [stats])
 
   useEffect(() => {
@@ -130,6 +132,7 @@ export default function Dashboard() {
       window.addEventListener('resize', r)
       return () => { window.removeEventListener('resize', r); chart.dispose() }
     }
+    return () => {}
   }, [stats])
 
   return (

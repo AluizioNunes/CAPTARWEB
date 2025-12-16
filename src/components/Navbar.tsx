@@ -115,6 +115,7 @@ function Navbar() {
       icon: <ThunderboltOutlined />,
       label: 'AUTOMAÇÃO',
       children: [
+        { key: '/automacao/campanha', icon: <FileTextOutlined />, label: 'CAMPANHA', onClick: () => navigate('/automacao/campanha') },
         { key: '/automacao/disparos', icon: <ApiOutlined />, label: 'DISPAROS', onClick: () => navigate('/automacao/disparos') },
       ],
     },
@@ -148,7 +149,12 @@ function Navbar() {
           </span>
         </div>
 
-        <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
+        <motion.div 
+          initial={{ opacity: 0, y: -8 }} 
+          animate={{ opacity: 1, y: 0 }} 
+          transition={{ duration: 0.4 }}
+          style={{ flex: 1, minWidth: 0, display: 'flex', justifyContent: 'center' }}
+        >
           <Menu
             mode="horizontal"
             selectedKeys={[location.pathname]}

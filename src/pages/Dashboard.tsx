@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Row, Col, Card, Statistic, Spin, Select, App as AntdApp } from 'antd'
+import { Row, Col, Card, Statistic, Spin, Select } from 'antd'
+import { toast } from 'sonner'
 import * as echarts from 'echarts'
 import { useRef } from 'react'
 import { UserOutlined, TeamOutlined, FileTextOutlined } from '@ant-design/icons'
@@ -7,7 +8,6 @@ import { useApi } from '../context/ApiContext'
 import { motion } from 'framer-motion'
 
 export default function Dashboard() {
-  const { message } = AntdApp.useApp()
   const [stats, setStats] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [tenantOptions, setTenantOptions] = useState<{ label: string; value: string }[]>([])
@@ -62,7 +62,7 @@ export default function Dashboard() {
         setTenantsCount((tens.rows || []).length)
       } catch {}
     } catch (error) {
-      message.error('Erro ao carregar dados do dashboard')
+      toast.error('Erro ao carregar dados do dashboard')
     } finally {
       setLoading(false)
     }

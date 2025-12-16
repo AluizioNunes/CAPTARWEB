@@ -420,6 +420,27 @@ class ApiService {
 
   // ==================== ELEITORES ====================
 
+  async getEleitoresSchema(): Promise<{ columns: { name: string; type: string; nullable: boolean; maxLength?: number }[] }> {
+    try {
+      const response = await this.api.get('/eleitores/schema')
+      return response.data
+    } catch (e: any) {
+      // Fallback schema
+      return {
+        columns: [
+          { name: 'id', type: 'integer', nullable: false },
+          { name: 'nome', type: 'string', nullable: false },
+          { name: 'cpf', type: 'string', nullable: true },
+          { name: 'celular', type: 'string', nullable: true },
+          { name: 'bairro', type: 'string', nullable: true },
+          { name: 'zona_eleitoral', type: 'string', nullable: true },
+          { name: 'DataCadastro', type: 'datetime', nullable: true },
+          { name: 'TenantLayer', type: 'string', nullable: true },
+        ]
+      }
+    }
+  }
+
   async getEleitores(): Promise<ApiResponse<Eleitor>> {
     try {
       const response = await this.api.get('/eleitores')
@@ -468,19 +489,69 @@ class ApiService {
 
   // ==================== ATIVISTAS ====================
 
-  async getAtivistas(): Promise<ApiResponse<Ativista>> {
-    const response = await this.api.get('/ativistas')
-    const data = response.data
-    const rows: Ativista[] = Array.isArray(data) ? (data as Ativista[]) : ((data.rows || []) as Ativista[])
-    const adminCtx = (localStorage.getItem('adminContext') || '') === '1'
-    const viewSlug = (localStorage.getItem('viewTenantSlug') || '').toUpperCase()
-    const viewName = (localStorage.getItem('viewTenantName') || '').toUpperCase()
-    if (adminCtx && viewSlug) {
-      const allow = new Set([viewSlug, viewName])
-      const filtered = rows.filter((r: Ativista) => allow.has(String((r as any).TenantLayer || '').toUpperCase()))
-      return { rows: filtered, columns: Array.isArray(data) ? [] : (data.columns || []) }
+  async getAtivistasSchema(): Promise<{ columns: { name: string; type: string; nullable: boolean; maxLength?: number }[] }> {
+    try {
+      const response = await this.api.get('/ativistas/schema')
+      return response.data
+    } catch (e: any) {
+      // Fallback schema
+      return {
+        columns: [
+          { name: 'id', type: 'integer', nullable: false },
+          { name: 'nome', type: 'string', nullable: false },
+          { name: 'tipo_apoio', type: 'string', nullable: true },
+          { name: 'area_atuacao', type: 'string', nullable: true },
+          { name: 'DataCadastro', type: 'datetime', nullable: true },
+          { name: 'TenantLayer', type: 'string', nullable: true },
+        ]
+      }
     }
-    return { rows, columns: Array.isArray(data) ? [] : (data.columns || []) }
+  }
+
+  async getAtivistas(): Promise<ApiResponse<Ativista>> {
+    try {
+      const response = await this.api.get('/ativistas')
+      const data = response.data
+      const rows: Ativista[] = Array.isArray(data) ? (data as Ativista[]) : ((data.rows || []) as Ativista[])
+      const adminCtx = (localStorage.getItem('adminContext') || '') === '1'
+      const viewSlug = (localStorage.getItem('viewTenantSlug') || '').toUpperCase()
+      const viewName = (localStorage.getItem('viewTenantName') || '').toUpperCase()
+      if (adminCtx && viewSlug) {
+        const allow = new Set([viewSlug, viewName])
+        const filtered = rows.filter((r: Ativista) => allow.has(String((r as any).TenantLayer || '').toUpperCase()))
+        return { rows: filtered, columns: Array.isArray(data) ? [] : (data.columns || []) }
+      }
+      return { rows, columns: Array.isArray(data) ? [] : (data.columns || []) }
+    } catch (e: any) {
+      const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
+      const response = await fb.get('/ativistas')
+      const data = response.data
+      const rows: Ativista[] = Array.isArray(data) ? (data as Ativista[]) : ((data.rows || []) as Ativista[])
+      const adminCtx = (localStorage.getItem('adminContext') || '') === '1'
+      const viewSlug = (localStorage.getItem('viewTenantSlug') || '').toUpperCase()
+      const viewName = (localStorage.getItem('viewTenantName') || '').toUpperCase()
+      if (adminCtx && viewSlug) {
+        const allow = new Set([viewSlug, viewName])
+        const filtered = rows.filter((r: Ativista) => allow.has(String((r as any).TenantLayer || '').toUpperCase()))
+        return { rows: filtered, columns: Array.isArray(data) ? [] : (data.columns || []) }
+      }
+      return { rows, columns: Array.isArray(data) ? [] : (data.columns || []) }
+    }
+  }
+
+  async createAtivista(data: any): Promise<any> {
+    const response = await this.api.post('/ativistas', data)
+    return response.data
+  }
+
+  async updateAtivista(id: number, data: any): Promise<any> {
+    const response = await this.api.put(`/ativistas/${id}`, data)
+    return response.data
+  }
+
+  async deleteAtivista(id: number): Promise<any> {
+    const response = await this.api.delete(`/ativistas/${id}`)
+    return response.data
   }
 
   async listCandidatos(): Promise<{ rows: any[]; columns: string[] }> {
@@ -906,6 +977,16 @@ class ApiService {
 
   async previewRecursoCkan(resource_url: string, limit: number = 15): Promise<{ columns: string[]; rows: any[] }> {
     const response = await this.api.post('/integracoes/ckan/preview', { resource_url, limit })
+    return response.data
+  }
+  
+  async getEvolutionApiKeyMasked(): Promise<{ hasKey: boolean; keyMasked: string }> {
+    const response = await this.api.get('/integracoes/evolution/key')
+    return response.data
+  }
+  
+  async testEvolutionApi(): Promise<{ ok: boolean; status_code: number; message?: string; version?: string }> {
+    const response = await this.api.get('/integracoes/evolution/test')
     return response.data
   }
 }

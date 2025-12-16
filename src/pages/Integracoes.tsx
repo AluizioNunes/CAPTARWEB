@@ -14,6 +14,8 @@ export default function Integracoes() {
   const [previewCols, setPreviewCols] = useState<string[]>([])
   const [previewRows, setPreviewRows] = useState<any[]>([])
   const [selectedResourceIndex, setSelectedResourceIndex] = useState<number>(0)
+  const [evoKeyMasked, setEvoKeyMasked] = useState<string>('')
+  const [evoStatus, setEvoStatus] = useState<'CONECTADO'|'DESCONECTADO'|'TESTANDO'>('DESCONECTADO')
 
   const api = useApi()
 
@@ -122,8 +124,25 @@ export default function Integracoes() {
       await loadMunicipios()
       await loadRecursos()
       await previewRecurso()
+      try {
+        const k = await api.getEvolutionApiKeyMasked()
+        setEvoKeyMasked(k.keyMasked || '')
+      } catch {}
     })()
   }, [])
+  
+  const testarEvolution = async () => {
+    try {
+      setEvoStatus('TESTANDO')
+      const res = await api.testEvolutionApi()
+      const ok = !!res.ok
+      setEvoStatus(ok ? 'CONECTADO' : 'DESCONECTADO')
+      message[ok ? 'success' : 'error'](ok ? `Evolution API conectada${res.version ? ` (v${res.version})` : ''}` : `Falha na Evolution API (HTTP ${res.status_code})`)
+    } catch (e: any) {
+      setEvoStatus('DESCONECTADO')
+      message.error(e?.response?.data?.detail || 'Erro ao testar Evolution API')
+    }
+  }
 
   return (
     <motion.div className="page-container" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
@@ -283,6 +302,20 @@ export default function Integracoes() {
             </Form>
           </Card>
 
+          <Divider />
+          
+          <Card title="Evolution API">
+            <Form layout="vertical">
+              <Form.Item label="Chave de Autenticação (mascarada)">
+                <Input value={evoKeyMasked} readOnly />
+              </Form.Item>
+              <Space>
+                <Button type="primary" onClick={testarEvolution}>Testar Evolution API</Button>
+                <Tag color={evoStatus === 'CONECTADO' ? 'green' : (evoStatus === 'TESTANDO' ? 'blue' : 'default')}>EVOLUTION: {evoStatus}</Tag>
+              </Space>
+            </Form>
+          </Card>
+          
           <Divider />
           <Card title="Prévia do Dataset Selecionado (primeiras linhas)">
             <Table

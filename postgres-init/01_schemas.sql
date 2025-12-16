@@ -10,3 +10,6 @@ DROP SCHEMA IF EXISTS public CASCADE;
 GRANT ALL ON SCHEMA "captar" TO captar;
 GRANT ALL ON SCHEMA "EvolutionAPI" TO captar;
 GRANT ALL ON SCHEMA "N8N" TO captar;
+
+-- Remove explicitamente o schema 'n8n' (minúsculo) se existir
+DROP SCHEMA IF EXISTS "n8n" CASCADE;

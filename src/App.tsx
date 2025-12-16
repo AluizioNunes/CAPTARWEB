@@ -3,8 +3,8 @@ import { Layout, App as AntApp } from 'antd'
 import { useAuthStore } from './store/authStore'
 import Navbar from './components/Navbar'
 import Login from './pages/Login'
-import Eleitor from './pages/Eleitor'
-import Ativista from './pages/Ativista'
+import Eleitores from './pages/Eleitores'
+import Ativistas from './pages/Ativistas'
 import Usuario from './pages/Usuario'
 import Permissoes from './pages/Permissoes'
 import Consultas from './pages/Consultas'
@@ -12,6 +12,7 @@ import Perfil from './pages/Perfil'
 import Funcoes from './pages/Funcoes'
 import Integracoes from './pages/Integracoes'
 const Disparos = lazy(() => import('./pages/Automacao/Disparos'))
+const Campanha = lazy(() => import('./pages/Automacao/Campanha'))
 import Metas from './pages/Metas'
 import Eleicoes from './pages/Eleicoes'
 import Candidatos from './pages/Candidatos'
@@ -20,6 +21,7 @@ const Dashboard = lazy(() => import('./pages/Dashboard'))
 const Estatisticas = lazy(() => import('./pages/Estatisticas'))
 const Tenants = lazy(() => import('./pages/Tenants'))
 import './App.css'
+import { Toaster } from 'sonner'
 import { AnimatePresence, motion } from 'framer-motion'
 
 const { Content } = Layout
@@ -40,8 +42,8 @@ function AppRoutes() {
               <Dashboard />
             </Suspense>
           ) : <Navigate to="/login" />} />
-          <Route path="/eleitores" element={isAuthenticated ? <Eleitor /> : <Navigate to="/login" />} />
-          <Route path="/ativistas" element={isAuthenticated ? <Ativista /> : <Navigate to="/login" />} />
+          <Route path="/eleitores" element={isAuthenticated ? <Eleitores /> : <Navigate to="/login" />} />
+          <Route path="/ativistas" element={isAuthenticated ? <Ativistas /> : <Navigate to="/login" />} />
           <Route path="/usuarios" element={isAuthenticated ? <Usuario /> : <Navigate to="/login" />} />
           <Route path="/perfil" element={isAuthenticated ? <Perfil /> : <Navigate to="/login" />} />
           <Route path="/funcoes" element={isAuthenticated ? <Funcoes /> : <Navigate to="/login" />} />
@@ -55,6 +57,11 @@ function AppRoutes() {
           <Route path="/automacao/disparos" element={isAuthenticated ? (
             <Suspense fallback={<div style={{ padding: 24 }}>Carregando...</div>}>
               <Disparos />
+            </Suspense>
+          ) : <Navigate to="/login" />} />
+          <Route path="/automacao/campanha" element={isAuthenticated ? (
+            <Suspense fallback={<div style={{ padding: 24 }}>Carregando...</div>}>
+              <Campanha />
             </Suspense>
           ) : <Navigate to="/login" />} />
           <Route path="/integracoes" element={isAuthenticated ? <Integracoes /> : <Navigate to="/login" />} />
@@ -86,6 +93,7 @@ function App() {
   return (
     <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       {isAuthenticated && <Navbar />}
+      <Toaster richColors />
       <AntApp>
         <Layout>
           <Content className="app-content">

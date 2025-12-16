@@ -37,6 +37,21 @@ import pathlib
 load_dotenv()
 
 # Database Configuration
+def _resolve_db_host() -> str:
+    import socket
+    env = os.getenv('DB_HOST', 'postgres') or 'postgres'
+    s = str(env).strip().lower()
+    if s in ('localhost', '127.0.0.1'):
+        try:
+            socket.getaddrinfo('postgres', None)
+            return 'postgres'
+        except Exception:
+            return env
+    try:
+        socket.getaddrinfo(env, None)
+        return env
+    except Exception:
+        return 'localhost'
 def _resolve_host(h: str, fallback: str = 'localhost') -> str:
     import socket
     try:
@@ -45,7 +60,7 @@ def _resolve_host(h: str, fallback: str = 'localhost') -> str:
     except Exception:
         return fallback
 
-DB_HOST = _resolve_host(os.getenv('DB_HOST', 'postgres'), 'localhost')
+DB_HOST = _resolve_db_host()
 DB_PORT = os.getenv('DB_PORT', '5432')
 DB_NAME = os.getenv('DB_NAME', 'captar')
 DB_USER = os.getenv('DB_USER', 'captar')
@@ -89,7 +104,17 @@ def _get_pool(dsn: str) -> any:
 @contextmanager
 def get_db_connection(dsn: str | None = None):
     use_dsn = (dsn.strip() if (dsn and dsn.strip()) else f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
-    conn = psycopg.connect(use_dsn)
+    conn = None
+    try:
+        conn = psycopg.connect(use_dsn)
+    except Exception:
+        if not dsn:
+            try:
+                alt_dsn = f"postgresql://{DB_USER}:{DB_PASSWORD}@postgres:{DB_PORT}/{DB_NAME}"
+                conn = psycopg.connect(alt_dsn)
+                use_dsn = alt_dsn
+            except Exception:
+                raise
     try:
         prev_autocommit = conn.autocommit
         conn.autocommit = True
@@ -3401,6 +3426,49 @@ async def integracoes_ckan_preview(payload: dict):
         # pandas lê CSV diretamente da URL
         df = pd.read_csv(url, nrows=limit)
         return {"columns": list(df.columns), "rows": df.head(limit).to_dict(orient="records")}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+def _mask_key(k: str) -> str:
+    s = str(k or "")
+    if len(s) <= 10:
+        return "*" * len(s) if s else ""
+    return s[:6] + ("*" * (len(s) - 10)) + s[-4:]
+
+@app.get("/api/integracoes/evolution/key")
+async def integracoes_evolution_key():
+    val = os.getenv("AUTHENTICATION_API_KEY", "")
+    return {"hasKey": bool(val), "keyMasked": _mask_key(val)}
+
+@app.get("/api/integracoes/evolution/test")
+async def integracoes_evolution_test():
+    try:
+        base = os.getenv("EVOLUTION_API_BASE", "http://evolution_api:4000")
+        key = os.getenv("AUTHENTICATION_API_KEY", "")
+        if not key:
+            raise HTTPException(status_code=400, detail="Chave não configurada")
+        req = urllib.request.Request(
+            url=base,
+            headers={"apikey": key, "Accept": "application/json", "Accept-Encoding": "identity", "User-Agent": "CAPTAR/1.0"}
+        )
+        ctx = ssl.create_default_context()
+        with urlopen(req, context=ctx, timeout=10) as resp:
+            code = resp.getcode()
+            raw = resp.read()
+            enc = resp.headers.get("Content-Encoding", "").lower()
+            if enc == "gzip" or (len(raw) > 2 and raw[0] == 0x1F and raw[1] == 0x8B):
+                raw = gzip.decompress(raw)
+            elif enc == "deflate" or (len(raw) > 2 and raw[0] == 0x78):
+                raw = zlib.decompress(raw)
+            msg = {}
+            try:
+                msg = json.loads(raw.decode("utf-8"))
+            except Exception:
+                msg = {"text": raw.decode("utf-8", errors="ignore")}
+            ok = 200 <= code < 300
+            return {"ok": ok, "status_code": code, "message": msg.get("message") or msg.get("status") or "", "version": msg.get("version") or ""}
     except HTTPException:
         raise
     except Exception as e:

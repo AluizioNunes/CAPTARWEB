@@ -7,10 +7,8 @@ services:
     container_name: captar-postgres
     labels:
       - "com.captar.stack=captar"
-    environment:
-      POSTGRES_USER: ${DB_USER:-captar}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-captar}
-      POSTGRES_DB: ${DB_NAME:-captar}
+    env_file:
+      - .env
     ports:
       - "5440:5432"
     volumes:
@@ -19,7 +17,7 @@ services:
     networks:
       - captar-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U captar"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -36,18 +34,13 @@ services:
     labels:
       - "com.captar.stack=captar"
     env_file:
-      - .env.docker
+      - .env
     environment:
-      DB_HOST: postgres
-      DB_PORT: "5432"
-      DB_NAME: ${DB_NAME:-captar}
-      DB_USER: ${DB_USER:-captar}
-      DB_PASSWORD: ${DB_PASSWORD:-captar}
-      DB_SCHEMA: ${DB_SCHEMA:-captar}
-      REDIS_HOST: redis
-      REDIS_PORT: "6379"
+      - DB_HOST=postgres
+      - REDIS_HOST=redis
+      - MONGO_HOST=mongodb
     ports:
-      - "${FASTAPI_HOST_PORT:-8001}:8000"
+      - "${FASTAPI_HOST_PORT}:8000"
     expose:
       - "8000"
     depends_on:
@@ -69,13 +62,12 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        VITE_API_URL: ${VITE_API_URL:-/api}
+        VITE_API_URL: ${VITE_API_URL}
     container_name: captar-frontend
     labels:
       - "com.captar.stack=captar"
-    environment:
-      VITE_API_URL: /api
-      VITE_APP_NAME: "CAPTAR v2.0"
+    env_file:
+      - .env
     depends_on:
       fastapi:
         condition: service_healthy
@@ -85,13 +77,15 @@ services:
     expose:
       - "80"
     ports:
-      - "${FRONTEND_HOST_PORT:-5501}:80"
+      - "${FRONTEND_HOST_PORT}:80"
 
   nginx:
     image: nginx:latest
     container_name: captar-nginx
     labels:
       - "com.captar.stack=captar"
+    env_file:
+      - .env
     ports:
       - "5500:80"
     volumes:
@@ -114,6 +108,8 @@ services:
     container_name: captar-nestjs
     labels:
       - "com.captar.stack=captar"
+    env_file:
+      - .env
     ports:
       - "33011:3001"
     networks:
@@ -125,9 +121,8 @@ services:
     container_name: captar-mongodb
     labels:
       - "com.captar.stack=captar"
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-captar}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-captar}
+    env_file:
+      - .env
     ports:
       - "27018:27017"
     volumes:
@@ -141,6 +136,8 @@ services:
     container_name: captar-redis
     labels:
       - "com.captar.stack=captar"
+    env_file:
+      - .env
     ports:
       - "6379:6379"
     networks:
@@ -152,6 +149,8 @@ services:
     container_name: captar-rabbitmq
     labels:
       - "com.captar.stack=captar"
+    env_file:
+      - .env
     ports:
       - "5672:5672"
       - "15672:15672"
@@ -162,20 +161,21 @@ services:
   n8n:
     image: docker.n8n.io/n8nio/n8n
     container_name: captar-n8n
+    env_file:
+      - .env
     environment:
-      GENERIC_TIMEZONE: ${TZ:-America/Manaus}
-      TZ: ${TZ:-America/Manaus}
-      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
-      N8N_RUNNERS_ENABLED: "true"
-      DB_TYPE: postgresdb
-      DB_POSTGRESDB_DATABASE: ${DB_NAME:-captar}
-      DB_POSTGRESDB_HOST: postgres
-      DB_POSTGRESDB_PORT: 5432
-      DB_POSTGRESDB_USER: ${DB_USER:-captar}
-      DB_POSTGRESDB_PASSWORD: ${DB_PASSWORD:-captar}
-      DB_POSTGRESDB_SCHEMA: n8n
-      N8N_SECURE_COOKIE: "false"
-      N8N_SESSION_COOKIE_SAMESITE: "lax"
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${DB_NAME}
+      - DB_POSTGRESDB_USER=${DB_USER}
+      - DB_POSTGRESDB_PASSWORD=${DB_PASSWORD}
+      - N8N_HOST=${DOMAIN_NAME}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - NODE_ENV=production
+      - WEBHOOK_URL=https://n8n.${DOMAIN_NAME}/
+      - GENERIC_TIMEZONE=${TIMEZONE}
     ports:
       - "5678:5678"
     volumes:
@@ -202,25 +202,13 @@ services:
       - evolution_instances:/evolution/instances
     networks:
       - captar-network
+    env_file:
+      - .env
     environment:
-      TZ: ${TZ:-America/Manaus}
-      DATABASE_ENABLED: "true"
-      DATABASE_PROVIDER: postgresql
-      DATABASE_CONNECTION_URI: "postgresql://${DB_USER:-captar}:${DB_PASSWORD:-captar}@${EV_DB_HOST:-postgres}:${EV_DB_PORT:-5432}/${DB_NAME:-captar}?schema=EvolutionAPI"
-      DATABASE_CONNECTION_CLIENT_NAME: evolution_exchange
-      DATABASE_SAVE_DATA_INSTANCE: "true"
-      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
-      DATABASE_SAVE_MESSAGE_UPDATE: "true"
-      DATABASE_SAVE_DATA_CONTACTS: "true"
-      DATABASE_SAVE_DATA_CHATS: "true"
-      DATABASE_SAVE_DATA_LABELS: "true"
-      DATABASE_SAVE_DATA_HISTORIC: "true"
-      CACHE_REDIS_ENABLED: "true"
-      CACHE_REDIS_URI: "redis://redis:6379/6"
-      CACHE_REDIS_PREFIX_KEY: evolution
-      CACHE_REDIS_SAVE_INSTANCES: "false"
-      CACHE_LOCAL_ENABLED: "false"
-      SERVER_PORT: "4000"
+      - DATABASE_CONNECTION_URI=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}?schema=EvolutionAPI
+      - CACHE_REDIS_URI=redis://redis:6379/6
+      - DB_HOST=postgres
+      - REDIS_HOST=redis
     expose:
       - "4000"
 
@@ -228,8 +216,10 @@ services:
     image: evoapicloud/evolution-manager:latest
     container_name: evolution_frontend
     restart: always
+    env_file:
+      - .env
     ports:
-      - "${EV_FRONTEND_HOST_PORT:-4001}:80"
+      - "${EV_FRONTEND_HOST_PORT}:80"
     volumes:
       - ./evmanager-conf:/opt/conf:ro
     entrypoint: ["/bin/sh", "-c", "mkdir -p /etc/nginx/conf.d && rm -rf /etc/nginx/conf.d/*.conf && cp /opt/conf/default.conf /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'"]
@@ -245,7 +235,7 @@ services:
       postgres:
         condition: service_healthy
     command: >
-      sh -lc "PGPASSWORD=${DB_PASSWORD:-captar} psql -h postgres -U ${DB_USER:-captar} -d ${DB_NAME:-captar} -c 'CREATE SCHEMA IF NOT EXISTS \"N8N\";' && PGPASSWORD=${DB_PASSWORD:-captar} psql -h postgres -U ${DB_USER:-captar} -d ${DB_NAME:-captar} -c 'SELECT 1;' && echo 'N8N schema ensured and DB connection validated'"
+      sh -lc "PGPASSWORD=${DB_PASSWORD} psql -h postgres -U ${DB_USER} -d ${DB_NAME} -c 'CREATE SCHEMA IF NOT EXISTS \"N8N\";' && PGPASSWORD=${DB_PASSWORD} psql -h postgres -U ${DB_USER} -d ${DB_NAME} -c 'SELECT 1;' && echo 'N8N schema ensured and DB connection validated'"
     networks:
       - captar-network
     restart: "no"

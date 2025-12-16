@@ -4,7 +4,13 @@ import react from '@vitejs/plugin-react-swc'
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const apiUrl = env.VITE_API_URL || 'http://localhost:8000/api'
-  const proxyTarget = apiUrl.replace(/\/api\/?$/, '')
+  let proxyTarget = apiUrl.replace(/\/api\/?$/, '')
+
+  // Fix for when VITE_API_URL is relative (e.g. /api)
+  if (!proxyTarget || proxyTarget.startsWith('/')) {
+    const backendPort = env.FASTAPI_HOST_PORT || '8001'
+    proxyTarget = `http://localhost:${backendPort}`
+  }
 
   return {
     plugins: [react()],

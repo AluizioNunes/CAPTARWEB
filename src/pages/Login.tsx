@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { Form, Input, Button, Divider, Tag, Space, Modal, App as AntdApp } from 'antd'
+import { toast } from 'sonner'
+import { Form, Input, Button, Divider, Tag, Space, Modal, message } from 'antd'
 import { UserOutlined, LockOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/authStore'
@@ -13,7 +14,6 @@ interface LoginFormValues {
 }
 
 export default function Login() {
-  const { message } = AntdApp.useApp()
   const navigate = useNavigate()
   const { login } = useAuthStore()
   const [loading, setLoading] = useState(false)
@@ -57,10 +57,10 @@ export default function Login() {
       }
 
       login(userData, response.token)
-      message.success('Login realizado com sucesso!')
+      toast.success('Login realizado com sucesso!')
       navigate('/')
     } catch (error: any) {
-      message.error(error.response?.data?.detail || 'Usuário ou senha inválidos')
+      toast.error(error.response?.data?.detail || 'Usuário ou senha inválidos')
     } finally {
       setLoading(false)
     }

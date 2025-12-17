@@ -314,6 +314,203 @@ async def tenants_set_dsn(slug: str, body: SetDsnRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ==================== 5. CAMPANHAS ====================
+
+class CampanhaCreate(BaseModel):
+    nome: str
+    descricao: Optional[str] = None
+    data_inicio: str
+    data_fim: Optional[str] = None
+    status: Optional[str] = 'PLANEJAMENTO'
+    meta: Optional[int] = 0
+    enviados: Optional[int] = 0
+    nao_enviados: Optional[int] = 0
+    positivos: Optional[int] = 0
+    negativos: Optional[int] = 0
+    aguardando: Optional[int] = 0
+    # Campos auxiliares para lógica de frontend
+    UsarEleitores: Optional[bool] = False
+    
+class CampanhaUpdate(BaseModel):
+    nome: Optional[str] = None
+    descricao: Optional[str] = None
+    data_inicio: Optional[str] = None
+    data_fim: Optional[str] = None
+    status: Optional[str] = None
+    meta: Optional[int] = None
+    enviados: Optional[int] = None
+    nao_enviados: Optional[int] = None
+    positivos: Optional[int] = None
+    negativos: Optional[int] = None
+    aguardando: Optional[int] = None
+
+@app.get("/api/campanhas/schema")
+async def campanhas_schema():
+    try:
+        # Retorna schema compatível com o frontend
+        return {
+            "columns": [
+                {"name": "id", "type": "integer", "nullable": False},
+                {"name": "nome", "type": "string", "nullable": False},
+                {"name": "descricao", "type": "text", "nullable": True},
+                {"name": "data_inicio", "type": "date", "nullable": False},
+                {"name": "data_fim", "type": "date", "nullable": True},
+                {"name": "status", "type": "string", "nullable": True},
+                {"name": "meta", "type": "integer", "nullable": True},
+                {"name": "enviados", "type": "integer", "nullable": True},
+                {"name": "nao_enviados", "type": "integer", "nullable": True},
+                {"name": "positivos", "type": "integer", "nullable": True},
+                {"name": "negativos", "type": "integer", "nullable": True},
+                {"name": "aguardando", "type": "integer", "nullable": True},
+                {"name": "created_at", "type": "timestamp", "nullable": True},
+                {"name": "updated_at", "type": "timestamp", "nullable": True},
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/campanhas")
+async def campanhas_list(limit: int = 1000, request: Request = None):
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            tid = _tenant_id_from_header(request)
+            
+            # Verificar se tabela existe
+            try:
+                cursor.execute(f"SELECT 1 FROM {DB_SCHEMA}.campanhas LIMIT 1")
+            except:
+                conn.rollback()
+                return {"rows": [], "columns": []}
+
+            cursor.execute(
+                f"""
+                SELECT id, nome, descricao, data_inicio, data_fim, status, 
+                       meta, enviados, nao_enviados, positivos, negativos, aguardando,
+                       criado_em as created_at
+                FROM {DB_SCHEMA}.campanhas 
+                WHERE "IdTenant" = %s OR "IdTenant" IS NULL
+                ORDER BY id DESC LIMIT %s
+                """,
+                (tid, limit)
+            )
+            colnames = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+            data = [dict(zip(colnames, row)) for row in rows]
+            return {"rows": data, "columns": colnames}
+    except Exception as e:
+        print(f"Error listing campanhas: {e}")
+        return {"rows": [], "columns": []}
+
+@app.post("/api/campanhas")
+async def campanhas_create(campanha: CampanhaCreate, request: Request):
+    try:
+        user_info = _extract_user_from_auth(request)
+        tid = _tenant_id_from_header(request)
+        
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                INSERT INTO {DB_SCHEMA}.campanhas 
+                (nome, descricao, data_inicio, data_fim, status, meta, enviados, nao_enviados, positivos, negativos, aguardando, criado_por, "IdTenant")
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    campanha.nome, 
+                    campanha.descricao, 
+                    campanha.data_inicio, 
+                    campanha.data_fim, 
+                    campanha.status,
+                    campanha.meta,
+                    campanha.enviados,
+                    campanha.nao_enviados,
+                    campanha.positivos,
+                    campanha.negativos,
+                    campanha.aguardando,
+                    user_info['id'],
+                    tid
+                )
+            )
+            new_id = cursor.fetchone()[0]
+            conn.commit()
+            return {"id": new_id, "message": "Campanha criada com sucesso"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/campanhas/{id}")
+async def campanhas_update(id: int, campanha: CampanhaUpdate, request: Request):
+    try:
+        tid = _tenant_id_from_header(request)
+        data = campanha.dict(exclude_unset=True)
+        if not data:
+             raise HTTPException(status_code=400, detail="Nenhum dado para atualizar")
+        
+        set_parts = []
+        values = []
+        for k, v in data.items():
+            set_parts.append(f"{k} = %s")
+            values.append(v)
+            
+        values.append(id)
+        values.append(tid)
+        
+        query = f"UPDATE {DB_SCHEMA}.campanhas SET {', '.join(set_parts)}, atualizado_em = NOW() WHERE id = %s AND (\"IdTenant\" = %s OR \"IdTenant\" IS NULL)"
+        
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, tuple(values))
+            conn.commit()
+            return {"id": id, "message": "Campanha atualizada com sucesso"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/campanhas/{id}")
+async def campanhas_delete(id: int, request: Request):
+    try:
+        tid = _tenant_id_from_header(request)
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"DELETE FROM {DB_SCHEMA}.campanhas WHERE id = %s AND (\"IdTenant\" = %s OR \"IdTenant\" IS NULL)", 
+                (id, tid)
+            )
+            conn.commit()
+            return {"message": "Campanha removida com sucesso"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/campanhas/{id}/anexo")
+async def campanhas_upload_anexo(id: int, file: UploadFile = File(...), request: Request):
+    try:
+        tid = _tenant_id_from_header(request)
+        content_bytes = await file.read()
+        content_str = None
+        
+        # Se for JSON, salvar conteudo
+        if file.filename.lower().endswith('.json'):
+            try:
+                # Validar se é JSON válido
+                json_obj = json.loads(content_bytes)
+                content_str = json.dumps(json_obj)
+            except:
+                pass
+        
+        # Salvar no banco se houver conteudo JSON
+        if content_str:
+             with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"UPDATE {DB_SCHEMA}.campanhas SET conteudo_arquivo = %s WHERE id = %s AND (\"IdTenant\" = %s OR \"IdTenant\" IS NULL)",
+                    (content_str, id, tid)
+                )
+                conn.commit()
+
+        return {"message": "Arquivo enviado com sucesso", "filename": file.filename}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 class ProvisionTenantRequest(BaseModel):
     nome: str
     slug: str
@@ -954,6 +1151,58 @@ def apply_migrations():
             actions.append('Usuarios.Ativista ensured')
         except Exception:
             pass
+
+        # -----------------------------------------------------------
+        # CAMPANHAS MIGRATION
+        # -----------------------------------------------------------
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.campanhas (
+                    id SERIAL PRIMARY KEY,
+                    nome VARCHAR(255) NOT NULL,
+                    descricao TEXT,
+                    data_inicio DATE NOT NULL,
+                    data_fim DATE,
+                    status VARCHAR(50) DEFAULT 'PLANEJAMENTO',
+                    meta INTEGER DEFAULT 0,
+                    enviados INTEGER DEFAULT 0,
+                    nao_enviados INTEGER DEFAULT 0,
+                    positivos INTEGER DEFAULT 0,
+                    negativos INTEGER DEFAULT 0,
+                    aguardando INTEGER DEFAULT 0,
+                    criado_por INTEGER REFERENCES "{DB_SCHEMA}"."Usuarios"("IdUsuario"),
+                    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    "IdTenant" INTEGER REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                )
+                """
+            )
+            actions.append('campanhas created')
+            
+            # Ensure new columns exist if table already existed
+            campanha_cols = [
+                "meta", "enviados", "nao_enviados", "positivos", "negativos", "aguardando"
+            ]
+            for col in campanha_cols:
+                cur.execute(
+                    f"ALTER TABLE {DB_SCHEMA}.campanhas ADD COLUMN IF NOT EXISTS {col} INTEGER DEFAULT 0"
+                )
+            
+            # Add conteudo_arquivo column
+            cur.execute(
+                f"ALTER TABLE {DB_SCHEMA}.campanhas ADD COLUMN IF NOT EXISTS conteudo_arquivo TEXT"
+            )
+            
+            # Remove orcamento if exists (optional, keeping it clean)
+            # cur.execute(f"ALTER TABLE {DB_SCHEMA}.campanhas DROP COLUMN IF EXISTS orcamento")
+            
+            actions.append('campanhas columns ensured')
+
+        except Exception as e:
+            actions.append(f'campanhas error: {str(e)}')
+            pass
+            
     return actions
 
 def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):

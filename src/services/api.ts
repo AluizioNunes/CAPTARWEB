@@ -554,6 +554,65 @@ class ApiService {
     return response.data
   }
 
+  // ==================== CAMPANHAS ====================
+
+  async getCampanhasSchema(): Promise<{ columns: { name: string; type: string; nullable: boolean; maxLength?: number }[] }> {
+    try {
+      const response = await this.api.get('/campanhas/schema')
+      return response.data
+    } catch (e: any) {
+      // Fallback schema
+      return {
+        columns: [
+          { name: 'id', type: 'integer', nullable: false },
+          { name: 'nome', type: 'string', nullable: false },
+          { name: 'descricao', type: 'text', nullable: true },
+          { name: 'status', type: 'string', nullable: true },
+          { name: 'data_inicio', type: 'date', nullable: false },
+          { name: 'data_fim', type: 'date', nullable: true },
+          { name: 'meta', type: 'integer', nullable: true },
+          { name: 'enviados', type: 'integer', nullable: true },
+          { name: 'nao_enviados', type: 'integer', nullable: true },
+          { name: 'positivos', type: 'integer', nullable: true },
+          { name: 'negativos', type: 'integer', nullable: true },
+          { name: 'aguardando', type: 'integer', nullable: true },
+          { name: 'created_at', type: 'datetime', nullable: true },
+        ]
+      }
+    }
+  }
+
+  async getCampanhas(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/campanhas')
+    return response.data
+  }
+
+  async createCampanha(data: any): Promise<any> {
+    const response = await this.api.post('/campanhas', data)
+    return response.data
+  }
+
+  async updateCampanha(id: number, data: any): Promise<any> {
+    const response = await this.api.put(`/campanhas/${id}`, data)
+    return response.data
+  }
+
+  async deleteCampanha(id: number): Promise<any> {
+    const response = await this.api.delete(`/campanhas/${id}`)
+    return response.data
+  }
+
+  async uploadCampanhaAnexo(id: number, data: { file?: File; data_url?: string; type?: string }): Promise<any> {
+    const formData = new FormData()
+    if (data.file) formData.append('file', data.file)
+    if (data.data_url) formData.append('data_url', data.data_url)
+    if (data.type) formData.append('type', data.type)
+    const response = await this.api.post(`/campanhas/${id}/anexo`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+    return response.data
+  }
+
   async listCandidatos(): Promise<{ rows: any[]; columns: string[] }> {
     const response = await this.api.get('/candidatos')
     return response.data

@@ -1,5 +1,6 @@
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { Layout, App as AntApp } from 'antd'
+import { lazy, Suspense } from 'react'
 import { useAuthStore } from './store/authStore'
 import Navbar from './components/Navbar'
 import Login from './pages/Login'
@@ -11,18 +12,18 @@ import Consultas from './pages/Consultas'
 import Perfil from './pages/Perfil'
 import Funcoes from './pages/Funcoes'
 import Integracoes from './pages/Integracoes'
-const Disparos = lazy(() => import('./pages/Automacao/Disparos'))
-const Campanha = lazy(() => import('./pages/Automacao/Campanha'))
 import Metas from './pages/Metas'
 import Eleicoes from './pages/Eleicoes'
 import Candidatos from './pages/Candidatos'
-import { lazy, Suspense } from 'react'
-const Dashboard = lazy(() => import('./pages/Dashboard'))
-const Estatisticas = lazy(() => import('./pages/Estatisticas'))
-const Tenants = lazy(() => import('./pages/Tenants'))
 import './App.css'
 import { Toaster } from 'sonner'
 import { AnimatePresence, motion } from 'framer-motion'
+
+const Disparos = lazy(() => import('./pages/Automacao/Disparos'))
+const Campanha = lazy(() => import('./pages/Automacao/Campanha'))
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const Estatisticas = lazy(() => import('./pages/Estatisticas'))
+const Tenants = lazy(() => import('./pages/Tenants'))
 
 const { Content } = Layout
 

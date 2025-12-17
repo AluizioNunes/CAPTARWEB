@@ -482,7 +482,7 @@ async def campanhas_delete(id: int, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/campanhas/{id}/anexo")
-async def campanhas_upload_anexo(id: int, file: UploadFile = File(...), request: Request):
+async def campanhas_upload_anexo(id: int, request: Request, file: UploadFile = File(...)):
     try:
         tid = _tenant_id_from_header(request)
         content_bytes = await file.read()

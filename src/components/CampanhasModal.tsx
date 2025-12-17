@@ -5,6 +5,7 @@ import { useApi } from '../context/ApiContext'
 import { useAuthStore } from '../store/authStore'
 import { format, parseISO, isValid, isWithinInterval } from 'date-fns'
 import { ptBR } from 'date-fns/locale'
+import dayjs from 'dayjs'
 import Logo from '../images/CAPTAR LOGO OFICIAL.jpg'
 
 interface Props {
@@ -67,8 +68,8 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
       if (initial) {
         form.setFieldsValue({
           ...initial,
-          data_inicio: initial.data_inicio ? parseISO(initial.data_inicio) : undefined,
-          data_fim: initial.data_fim ? parseISO(initial.data_fim) : undefined,
+          data_inicio: initial.data_inicio ? dayjs(initial.data_inicio) : undefined,
+          data_fim: initial.data_fim ? dayjs(initial.data_fim) : undefined,
         })
         if (initial.AnexoJSON || initial.Anexo) {
             setDestino('arquivo')
@@ -165,8 +166,8 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
       
       const payload: any = {
         ...values,
-        data_inicio: values.data_inicio ? format(values.data_inicio, 'yyyy-MM-dd') : null,
-        data_fim: values.data_fim ? format(values.data_fim, 'yyyy-MM-dd') : null,
+        data_inicio: values.data_inicio ? values.data_inicio.format('YYYY-MM-DD') : null,
+        data_fim: values.data_fim ? values.data_fim.format('YYYY-MM-DD') : null,
         meta, // Save calculated meta
         enviados,
         nao_enviados: naoEnviados,

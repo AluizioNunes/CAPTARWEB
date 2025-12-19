@@ -37,6 +37,7 @@ import pathlib
 import aiohttp
 import traceback
 import uuid
+import unicodedata
 
 load_dotenv()
 
@@ -560,6 +561,32 @@ def _digits_only(s: Any) -> str:
     except Exception:
         return ''
 
+def _strip_accents(s: str) -> str:
+    try:
+        nfkd = unicodedata.normalize('NFKD', str(s or ''))
+        return ''.join([c for c in nfkd if not unicodedata.combining(c)])
+    except Exception:
+        return str(s or '')
+
+def _parse_sim_nao_response(text: Any) -> Optional[int]:
+    try:
+        raw = str(text or '').strip()
+        if not raw:
+            return None
+        t = _strip_accents(raw).strip().lower()
+        t = re.sub(r'\s+', ' ', t)
+        if re.match(r'^\(?\s*1\b', t) or t.startswith('1-') or t.startswith('1 ') or t == '1':
+            return 1
+        if re.match(r'^\(?\s*2\b', t) or t.startswith('2-') or t.startswith('2 ') or t == '2':
+            return 2
+        if re.search(r'\bsim\b', t) or t in ('s', 'ok', 'yes', 'y'):
+            return 1
+        if re.search(r'\bnao\b', t) or t in ('n', 'no'):
+            return 2
+        return None
+    except Exception:
+        return None
+
 def _extract_evolution_text(payload: Any) -> str:
     try:
         if payload is None:
@@ -567,22 +594,50 @@ def _extract_evolution_text(payload: Any) -> str:
         if isinstance(payload, str):
             return payload
         if isinstance(payload, dict):
-            for k in ('text', 'message', 'body', 'content', 'mensagem'):
+            for k in ('text', 'message', 'body', 'content', 'mensagem', 'conversation'):
                 v = payload.get(k)
                 if isinstance(v, str) and v.strip():
                     return v
             data = payload.get('data') or payload.get('event') or payload.get('payload')
             if isinstance(data, dict):
-                for k in ('text', 'message', 'body', 'content'):
+                for k in ('text', 'body', 'content', 'conversation'):
                     v = data.get(k)
                     if isinstance(v, str) and v.strip():
                         return v
                 msg = data.get('message')
                 if isinstance(msg, dict):
-                    for k in ('text', 'body', 'content'):
+                    for k in ('text', 'body', 'content', 'conversation', 'caption'):
                         v = msg.get(k)
                         if isinstance(v, str) and v.strip():
                             return v
+                    ext = msg.get('extendedTextMessage')
+                    if isinstance(ext, dict):
+                        v = ext.get('text')
+                        if isinstance(v, str) and v.strip():
+                            return v
+                    btn = msg.get('buttonsResponseMessage')
+                    if isinstance(btn, dict):
+                        for k in ('selectedButtonId', 'selectedDisplayText'):
+                            v = btn.get(k)
+                            if isinstance(v, str) and v.strip():
+                                return v
+                    lst = msg.get('listResponseMessage')
+                    if isinstance(lst, dict):
+                        single = lst.get('singleSelectReply')
+                        if isinstance(single, dict):
+                            for k in ('selectedRowId', 'title'):
+                                v = single.get(k)
+                                if isinstance(v, str) and v.strip():
+                                    return v
+                        v = lst.get('title')
+                        if isinstance(v, str) and v.strip():
+                            return v
+                    tpl = msg.get('templateButtonReplyMessage')
+                    if isinstance(tpl, dict):
+                        for k in ('selectedId', 'selectedDisplayText'):
+                            v = tpl.get(k)
+                            if isinstance(v, str) and v.strip():
+                                return v
         return ''
     except Exception:
         return ''
@@ -616,6 +671,16 @@ def _extract_evolution_number(payload: Any) -> str:
         return ''
 
 def _match_phone(stored: Any, incoming_digits: str) -> bool:
+    def norm_br(d: str) -> str:
+        if not d:
+            return d
+        dd = ''.join([c for c in str(d) if c.isdigit()])
+        if len(dd) == 13 and dd.startswith('55') and dd[4] == '9':
+            return dd[:4] + dd[5:]
+        if len(dd) == 11 and dd[2] == '9':
+            return dd[:2] + dd[3:]
+        return dd
+
     a = _digits_only(stored)
     b = _digits_only(incoming_digits)
     if not a or not b:
@@ -626,23 +691,62 @@ def _match_phone(stored: Any, incoming_digits: str) -> bool:
         return True
     if len(b) >= 10 and a.endswith(b[-10:]):
         return True
+    an = norm_br(a)
+    bn = norm_br(b)
+    if an and bn:
+        if an == bn:
+            return True
+        if len(an) >= 10 and bn.endswith(an[-10:]):
+            return True
+        if len(bn) >= 10 and an.endswith(bn[-10:]):
+            return True
     return False
 
 @app.post("/api/integrations/whatsapp/webhook")
-async def whatsapp_webhook(payload: Dict[str, Any], request: Request):
+async def whatsapp_webhook(payload: Dict[str, Any], request: Request, tenant: Optional[str] = None):
     try:
-        tid = _tenant_id_from_header(request)
         incoming_text = _extract_evolution_text(payload).strip()
         incoming_digits = _extract_evolution_number(payload)
         if not incoming_text or not incoming_digits:
-            return {"ok": True, "ignored": True}
+            return {"ok": True, "ignored": True, "reason": "missing_text_or_number"}
 
-        t = incoming_text.strip()
-        if t not in ('1', '2'):
-            return {"ok": True, "ignored": True}
-        resposta = 1 if t == '1' else 2
+        resposta = _parse_sim_nao_response(incoming_text)
+        if resposta not in (1, 2):
+            return {"ok": True, "ignored": True, "reason": "not_sim_nao"}
 
-        with get_conn_for_request(request) as conn:
+        slug = (request.headers.get('X-Tenant') or tenant or 'captar').strip() or 'captar'
+        try:
+            rc = get_redis_client()
+            cached = rc.get(f"tenant:id:{slug}") if rc else None
+            tid = int(cached) if cached else None
+        except Exception:
+            tid = None
+        if not tid:
+            try:
+                with get_db_connection() as conn_t:
+                    cur_t = conn_t.cursor()
+                    cur_t.execute(
+                        f"SELECT \"IdTenant\" FROM \"{DB_SCHEMA}\".\"Tenant\" WHERE LOWER(\"Slug\") = LOWER(%s) LIMIT 1",
+                        (slug,)
+                    )
+                    row = cur_t.fetchone()
+                    tid = int(row[0]) if row else 1
+                try:
+                    if rc:
+                        rc.setex(f"tenant:id:{slug}", 300, str(tid))
+                except Exception:
+                    pass
+            except Exception:
+                tid = 1
+
+        dsn = None
+        if str(slug).lower() != 'captar':
+            try:
+                dsn = _get_dsn_by_slug(str(slug).lower())
+            except Exception:
+                dsn = None
+
+        with get_db_connection(dsn) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 f"""
@@ -709,17 +813,26 @@ async def whatsapp_webhook(payload: Dict[str, Any], request: Request):
                         break
 
                 if idx_match < 0:
-                    conn.rollback()
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
                     continue
 
                 cur = contacts[idx_match]
                 status_val = cur.get('status') if isinstance(cur, dict) else None
                 if str(status_val or '').lower() != 'success':
-                    conn.rollback()
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
                     continue
                 existing = cur.get('resposta') if isinstance(cur, dict) else None
                 if existing in (1, 2, '1', '2'):
-                    conn.rollback()
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
                     return {"ok": True, "ignored": True, "already": True, "campanha_id": campanha_id}
 
                 cur['resposta'] = resposta
@@ -746,10 +859,10 @@ async def whatsapp_webhook(payload: Dict[str, Any], request: Request):
                     (json.dumps(anexo_obj, ensure_ascii=False), positivos, negativos, aguardando, campanha_id, tid)
                 )
                 conn.commit()
-                return {"ok": True, "campanha_id": campanha_id, "resposta": resposta}
+                return {"ok": True, "campanha_id": campanha_id, "resposta": resposta, "tenant": slug}
 
             conn.rollback()
-            return {"ok": True, "ignored": True}
+            return {"ok": True, "ignored": True, "reason": "no_matching_contact_or_campaign", "tenant": slug}
     except Exception as e:
         try:
             traceback.print_exc()
@@ -774,6 +887,14 @@ class CampanhaCreate(BaseModel):
     anexo_json: Optional[Union[str, Dict, List]] = None
     imagem: Optional[str] = None
     usar_eleitores: Optional[bool] = False
+    recorrencia_ativa: Optional[bool] = False
+    total_blocos: Optional[int] = 5
+    mensagens_por_bloco: Optional[int] = 500
+    blocos_por_dia: Optional[int] = 1
+    intervalo_min_seg: Optional[int] = 5
+    intervalo_max_seg: Optional[int] = 120
+    bloco_atual: Optional[int] = 0
+    proxima_execucao: Optional[str] = None
     
 class CampanhaUpdate(BaseModel):
     nome: Optional[str] = None
@@ -789,6 +910,14 @@ class CampanhaUpdate(BaseModel):
     aguardando: Optional[int] = None
     anexo_json: Optional[Union[str, Dict, List]] = None
     imagem: Optional[str] = None
+    recorrencia_ativa: Optional[bool] = None
+    total_blocos: Optional[int] = None
+    mensagens_por_bloco: Optional[int] = None
+    blocos_por_dia: Optional[int] = None
+    intervalo_min_seg: Optional[int] = None
+    intervalo_max_seg: Optional[int] = None
+    bloco_atual: Optional[int] = None
+    proxima_execucao: Optional[str] = None
 
 @app.get("/api/campanhas/schema")
 async def campanhas_schema():
@@ -808,6 +937,14 @@ async def campanhas_schema():
                 {"name": "positivos", "type": "integer", "nullable": True},
                 {"name": "negativos", "type": "integer", "nullable": True},
                 {"name": "aguardando", "type": "integer", "nullable": True},
+                {"name": "recorrencia_ativa", "type": "boolean", "nullable": True},
+                {"name": "total_blocos", "type": "integer", "nullable": True},
+                {"name": "mensagens_por_bloco", "type": "integer", "nullable": True},
+                {"name": "blocos_por_dia", "type": "integer", "nullable": True},
+                {"name": "intervalo_min_seg", "type": "integer", "nullable": True},
+                {"name": "intervalo_max_seg", "type": "integer", "nullable": True},
+                {"name": "bloco_atual", "type": "integer", "nullable": True},
+                {"name": "proxima_execucao", "type": "timestamp", "nullable": True},
                 {"name": "created_at", "type": "timestamp", "nullable": True},
                 {"name": "updated_at", "type": "timestamp", "nullable": True},
                 {"name": "cadastrante", "type": "string", "nullable": True},
@@ -836,6 +973,14 @@ async def campanhas_list(limit: int = 1000, request: Request = None):
                        "DataInicio" as data_inicio, "DataFim" as data_fim, "Status" as status, 
                        "Meta" as meta, "Enviados" as enviados, "NaoEnviados" as nao_enviados, 
                        "Positivos" as positivos, "Negativos" as negativos, "Aguardando" as aguardando,
+                       "RecorrenciaAtiva" as recorrencia_ativa,
+                       "TotalBlocos" as total_blocos,
+                       "MensagensPorBloco" as mensagens_por_bloco,
+                       "BlocosPorDia" as blocos_por_dia,
+                       "IntervaloMinSeg" as intervalo_min_seg,
+                       "IntervaloMaxSeg" as intervalo_max_seg,
+                       "BlocoAtual" as bloco_atual,
+                       "ProximaExecucao" as proxima_execucao,
                        "Cadastrante" as cadastrante, "DataCriacao" as created_at, "Atualizacao" as updated_at, 
                        "AnexoJSON" as conteudo_arquivo, "Imagem" as imagem
                 FROM "{DB_SCHEMA}"."Campanhas" 
@@ -910,13 +1055,26 @@ async def campanhas_create(campanha: CampanhaCreate, request: Request):
             if campanha.imagem:
                 imagem_db = _normalize_campanha_imagem(campanha.imagem, tid)
 
+            recorrencia_ativa = bool(campanha.recorrencia_ativa or False)
+            total_blocos = int(campanha.total_blocos or 5)
+            mensagens_por_bloco = int(campanha.mensagens_por_bloco or 500)
+            blocos_por_dia = int(campanha.blocos_por_dia or 1)
+            intervalo_min_seg = int(campanha.intervalo_min_seg or 5)
+            intervalo_max_seg = int(campanha.intervalo_max_seg or 120)
+            bloco_atual = int(campanha.bloco_atual or 0)
+            proxima_execucao = campanha.proxima_execucao
+
             cursor.execute(
                 f"""
                 INSERT INTO "{DB_SCHEMA}"."Campanhas" 
                 ("NomeCampanha", "Texto", "DataInicio", "DataFim", "Status", 
                  "Meta", "Enviados", "NaoEnviados", "Positivos", "Negativos", "Aguardando", 
-                 "Cadastrante", "DataCriacao", "Atualizacao", "AnexoJSON", "Imagem", "IdTenant")
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), %s::jsonb, %s, %s)
+                 "Cadastrante", "DataCriacao", "Atualizacao", "AnexoJSON", "Imagem",
+                 "RecorrenciaAtiva", "TotalBlocos", "MensagensPorBloco", "BlocosPorDia",
+                 "IntervaloMinSeg", "IntervaloMaxSeg", "BlocoAtual", "ProximaExecucao",
+                 "IdTenant")
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), %s::jsonb, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING "IdCampanha"
                 """,
                 (
@@ -934,6 +1092,14 @@ async def campanhas_create(campanha: CampanhaCreate, request: Request):
                     cadastrante,
                     anexo_json,
                     imagem_db,
+                    recorrencia_ativa,
+                    total_blocos,
+                    mensagens_por_bloco,
+                    blocos_por_dia,
+                    intervalo_min_seg,
+                    intervalo_max_seg,
+                    bloco_atual,
+                    proxima_execucao,
                     tid
                 )
             )
@@ -966,7 +1132,15 @@ async def campanhas_update(id: int, campanha: CampanhaUpdate, request: Request):
             'negativos': 'Negativos',
             'aguardando': 'Aguardando',
             'anexo_json': 'AnexoJSON',
-            'imagem': 'Imagem'
+            'imagem': 'Imagem',
+            'recorrencia_ativa': 'RecorrenciaAtiva',
+            'total_blocos': 'TotalBlocos',
+            'mensagens_por_bloco': 'MensagensPorBloco',
+            'blocos_por_dia': 'BlocosPorDia',
+            'intervalo_min_seg': 'IntervaloMinSeg',
+            'intervalo_max_seg': 'IntervaloMaxSeg',
+            'bloco_atual': 'BlocoAtual',
+            'proxima_execucao': 'ProximaExecucao'
         }
         
         # Ensure AnexoJSON is serialized
@@ -989,6 +1163,8 @@ async def campanhas_update(id: int, campanha: CampanhaUpdate, request: Request):
             if k in key_map:
                 if k == 'anexo_json':
                      set_parts.append(f"\"{key_map[k]}\" = %s::jsonb")
+                elif k == 'proxima_execucao':
+                     set_parts.append(f"\"{key_map[k]}\" = %s::timestamp")
                 else:
                      set_parts.append(f"\"{key_map[k]}\" = %s")
                 values.append(v)
@@ -1852,32 +2028,21 @@ def apply_migrations():
                     "Atualizacao" TIMESTAMP,
                     "AnexoJSON" JSONB,
                     "Imagem" TEXT,
+                    "RecorrenciaAtiva" BOOLEAN DEFAULT FALSE,
+                    "TotalBlocos" INTEGER DEFAULT 5,
+                    "MensagensPorBloco" INTEGER DEFAULT 500,
+                    "BlocosPorDia" INTEGER DEFAULT 1,
+                    "IntervaloMinSeg" INTEGER DEFAULT 5,
+                    "IntervaloMaxSeg" INTEGER DEFAULT 120,
+                    "BlocoAtual" INTEGER DEFAULT 0,
+                    "ProximaExecucao" TIMESTAMP,
                     "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
                 )
                 """
             )
             actions.append('Campanhas created')
             
-            # ALTER COLUMNS TO MATCH NEW SCHEMA
             try:
-                # Resize VARCHAR(255) to VARCHAR(500)
-                cur.execute(f'ALTER TABLE "{DB_SCHEMA}"."Campanhas" ALTER COLUMN "NomeCampanha" TYPE VARCHAR(500)')
-                cur.execute(f'ALTER TABLE "{DB_SCHEMA}"."Campanhas" ALTER COLUMN "Cadastrante" TYPE VARCHAR(500)')
-                
-                # Change Status to BOOLEAN (casting 'PLANEJAMENTO'/'ATIVO' etc to boolean if needed, or default true)
-                # CASE: If 'INATIVO' or 'FALSE' or '0' -> False, else True
-                cur.execute(f"""
-                    ALTER TABLE "{DB_SCHEMA}"."Campanhas" 
-                    ALTER COLUMN "Status" TYPE BOOLEAN 
-                    USING (CASE 
-                        WHEN "Status"::text ILIKE 'INATIVO' OR "Status"::text ILIKE 'FALSE' OR "Status"::text = '0' THEN FALSE 
-                        ELSE TRUE 
-                    END)
-                """)
-                
-                # Change AnexoJSON to JSONB
-                cur.execute(f'ALTER TABLE "{DB_SCHEMA}"."Campanhas" ALTER COLUMN "AnexoJSON" TYPE JSONB USING "AnexoJSON"::jsonb')
-                
                 # Ensure columns exist (if table existed but missed some columns)
                 campanha_cols = [
                     ('"Meta"', 'INTEGER DEFAULT 0'),
@@ -1888,7 +2053,15 @@ def apply_migrations():
                     ('"Aguardando"', 'INTEGER DEFAULT 0'),
                     ('"Cadastrante"', 'VARCHAR(500)'),
                     ('"AnexoJSON"', 'JSONB'),
-                    ('"Imagem"', 'TEXT')
+                    ('"Imagem"', 'TEXT'),
+                    ('"RecorrenciaAtiva"', 'BOOLEAN DEFAULT FALSE'),
+                    ('"TotalBlocos"', 'INTEGER DEFAULT 5'),
+                    ('"MensagensPorBloco"', 'INTEGER DEFAULT 500'),
+                    ('"BlocosPorDia"', 'INTEGER DEFAULT 1'),
+                    ('"IntervaloMinSeg"', 'INTEGER DEFAULT 5'),
+                    ('"IntervaloMaxSeg"', 'INTEGER DEFAULT 120'),
+                    ('"BlocoAtual"', 'INTEGER DEFAULT 0'),
+                    ('"ProximaExecucao"', 'TIMESTAMP')
                 ]
                 for col_name, col_type in campanha_cols:
                     try:
@@ -2160,6 +2333,60 @@ def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):
                         actions.append(f'{table_name}.{column_name} -> VARCHAR(15)')
             except Exception:
                 pass
+
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Campanhas" (
+                    "IdCampanha" SERIAL PRIMARY KEY,
+                    "NomeCampanha" VARCHAR(500),
+                    "Texto" TEXT,
+                    "DataInicio" DATE,
+                    "DataFim" DATE,
+                    "Status" BOOLEAN DEFAULT TRUE,
+                    "Meta" INTEGER DEFAULT 0,
+                    "Enviados" INTEGER DEFAULT 0,
+                    "NaoEnviados" INTEGER DEFAULT 0,
+                    "Positivos" INTEGER DEFAULT 0,
+                    "Negativos" INTEGER DEFAULT 0,
+                    "Aguardando" INTEGER DEFAULT 0,
+                    "Cadastrante" VARCHAR(500),
+                    "DataCriacao" TIMESTAMP DEFAULT NOW(),
+                    "Atualizacao" TIMESTAMP,
+                    "AnexoJSON" JSONB,
+                    "Imagem" TEXT,
+                    "RecorrenciaAtiva" BOOLEAN DEFAULT FALSE,
+                    "TotalBlocos" INTEGER DEFAULT 5,
+                    "MensagensPorBloco" INTEGER DEFAULT 500,
+                    "BlocosPorDia" INTEGER DEFAULT 1,
+                    "IntervaloMinSeg" INTEGER DEFAULT 5,
+                    "IntervaloMaxSeg" INTEGER DEFAULT 120,
+                    "BlocoAtual" INTEGER DEFAULT 0,
+                    "ProximaExecucao" TIMESTAMP,
+                    "IdTenant" INT
+                )
+                """
+            )
+            campanha_cols = [
+                ('"RecorrenciaAtiva"', 'BOOLEAN DEFAULT FALSE'),
+                ('"TotalBlocos"', 'INTEGER DEFAULT 5'),
+                ('"MensagensPorBloco"', 'INTEGER DEFAULT 500'),
+                ('"BlocosPorDia"', 'INTEGER DEFAULT 1'),
+                ('"IntervaloMinSeg"', 'INTEGER DEFAULT 5'),
+                ('"IntervaloMaxSeg"', 'INTEGER DEFAULT 120'),
+                ('"BlocoAtual"', 'INTEGER DEFAULT 0'),
+                ('"ProximaExecucao"', 'TIMESTAMP')
+            ]
+            for col_name, col_type in campanha_cols:
+                try:
+                    cur.execute(
+                        f"ALTER TABLE \"{DB_SCHEMA}\".\"Campanhas\" ADD COLUMN IF NOT EXISTS {col_name} {col_type}"
+                    )
+                except Exception:
+                    pass
+            actions.append('Campanhas ensured (tenant DB)')
+        except Exception:
+            pass
         # Inserir usuário ADMIN padrão (tenant DB)
         try:
             slug_upper = (slug or 'tenant').upper()

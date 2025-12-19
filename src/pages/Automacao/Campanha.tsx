@@ -58,6 +58,18 @@ export default function Campanha() {
         let contacts: any[] = []
         let config: any = {}
 
+        const parseResposta = (v: any) => {
+            const s = String(v ?? '').trim()
+            if (!s) return null
+            if (s === '1' || s === '2') return Number(s)
+            const low = s.toLowerCase()
+            if (/\bsim\b/.test(low) || low === 's') return 1
+            if (/\bnao\b/.test(low) || /\bnão\b/.test(low) || low === 'n') return 2
+            if (/^\(?\s*1\b/.test(low)) return 1
+            if (/^\(?\s*2\b/.test(low)) return 2
+            return null
+        }
+
         // Helper to find key case-insensitive
         const findVal = (obj: any, keys: string[]) => {
             if (!obj) return ''
@@ -86,12 +98,15 @@ export default function Campanha() {
                         const phone = findVal(row, ['whatsapp', 'celular', 'telefone', 'phone', 'mobile', 'tel'])
                         // Try to find name
                         const name = findVal(row, ['nome', 'name', 'cliente', 'full_name', 'fullname']) || `Contato ${idx + 1}`
+                        const respRaw = findVal(row, ['resposta', 'response', 'respondido', 'reply'])
+                        const resposta = parseResposta(respRaw)
                         
                         return {
                             id: idx,
                             nome: name,
                             whatsapp: phone,
                             status: row.status || 'waiting',
+                            resposta,
                             original: row
                         }
                     }).filter(c => c.whatsapp) // Filter out those without phone
@@ -219,6 +234,17 @@ export default function Campanha() {
       })
   }
 
+  const handleAtualizarCampanha = async () => {
+      if (!selectedCampanha) return
+      message.loading({ content: 'Atualizando...', key: 'refresh' })
+      try {
+          await load()
+          message.success({ content: 'Atualizado!', key: 'refresh' })
+      } catch {
+          message.error({ content: 'Erro ao atualizar', key: 'refresh' })
+      }
+  }
+
   const handleEnviarCampanha = async () => {
       if (!selectedCampanha) return
 
@@ -245,12 +271,36 @@ export default function Campanha() {
           // If it starts with data:, it's base64. If http, it's URL. Otherwise, assume it's a filename that backend will resolve.
           const mediaPayload = selectedCampanha.imagem ? resolveImageSrc(selectedCampanha.imagem) : undefined
 
+          const recorrenciaAtiva = !!(selectedCampanha as any).recorrencia_ativa
+          const totalBlocos = Number((selectedCampanha as any).total_blocos ?? 5)
+          const mensagensPorBloco = Number((selectedCampanha as any).mensagens_por_bloco ?? 500)
+          const blocosPorDia = Number((selectedCampanha as any).blocos_por_dia ?? 1)
+          let blocoAtual = Number((selectedCampanha as any).bloco_atual ?? 0)
+          const intervaloMinSegRaw = Number((selectedCampanha as any).intervalo_min_seg ?? 5)
+          const intervaloMaxSegRaw = Number((selectedCampanha as any).intervalo_max_seg ?? 120)
+          const intervaloMinSeg = Math.max(1, Math.min(intervaloMinSegRaw, intervaloMaxSegRaw))
+          const intervaloMaxSeg = Math.max(1, Math.max(intervaloMinSegRaw, intervaloMaxSegRaw))
+          const maxEnviosNesteRun = recorrenciaAtiva ? Math.max(1, Math.floor(mensagensPorBloco)) : Number.POSITIVE_INFINITY
+
+          if (recorrenciaAtiva && Number.isFinite(totalBlocos) && blocoAtual >= totalBlocos) {
+            setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] RECORRÊNCIA ENCERRADA: blocos concluídos (${blocoAtual}/${totalBlocos}).`])
+            message.warning({ content: 'Recorrência já concluiu todos os blocos.', key: 'envio' })
+            return
+          }
+          if (recorrenciaAtiva) {
+            setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] RECORRÊNCIA ATIVA: bloco ${blocoAtual + 1}/${totalBlocos}, até ${maxEnviosNesteRun} mensagens, intervalo ${intervaloMinSeg}s-${intervaloMaxSeg}s.`])
+          }
+
+          let enviosNesteRun = 0
+
           // We iterate over the FULL list to maintain indices, but skip success
           for (let i = 0; i < localContacts.length; i++) {
+              if (enviosNesteRun >= maxEnviosNesteRun) break
               const contact = localContacts[i]
               
               // Skip if already success
               if (contact.status === 'success') continue
+              enviosNesteRun++
               
               setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] Enviando mensagem para ${contact.nome} (${contact.whatsapp})...`])
               
@@ -338,8 +388,10 @@ export default function Campanha() {
                   setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] [ERRO] Falha ao entregar para ${contact.whatsapp}: ${errorMsg}`])
               }
               
-              // Small delay to avoid rate limiting if needed
-              await new Promise(resolve => globalThis.setTimeout(resolve, 1000))
+              const waitSeconds = recorrenciaAtiva
+                ? Math.floor(Math.random() * (intervaloMaxSeg - intervaloMinSeg + 1)) + intervaloMinSeg
+                : 1
+              await new Promise(resolve => globalThis.setTimeout(resolve, waitSeconds * 1000))
           }
           
           setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] DISPARO FINALIZADO.`])
@@ -366,12 +418,23 @@ export default function Campanha() {
                  } catch {}
              }
              
+             const shouldAdvanceBlock = recorrenciaAtiva && enviosNesteRun > 0
+             const nextBlocoAtual = shouldAdvanceBlock ? blocoAtual + 1 : blocoAtual
+             const nextExec = (() => {
+               if (!recorrenciaAtiva || !shouldAdvanceBlock) return undefined
+               const perDay = Number.isFinite(blocosPorDia) && blocosPorDia > 0 ? blocosPorDia : 1
+               if (perDay === 1) return dayjs().add(1, 'day').toISOString()
+               const minutes = Math.max(1, Math.floor(1440 / perDay))
+               return dayjs().add(minutes, 'minute').toISOString()
+             })()
+
              await api.updateCampanha(selectedCampanha.id, {
                  status: 'ATIVO',
                  enviados: (selectedCampanha.enviados || 0) + deltaEnviados,
                  nao_enviados: (selectedCampanha.nao_enviados || 0) + deltaNaoEnviados,
                  aguardando: Math.max(0, (selectedCampanha.aguardando || 0) + deltaAguardando),
-                 anexo_json: finalAnexo
+                 anexo_json: finalAnexo,
+                 ...(recorrenciaAtiva ? { bloco_atual: nextBlocoAtual, proxima_execucao: nextExec } : {})
              })
              
              // Reload list to update table and ensure consistency
@@ -675,6 +738,15 @@ export default function Campanha() {
                  </div>
                  
                  <div style={{ display: 'flex', gap: 8 }}>
+                     <Tooltip title="Atualizar dados e respostas da campanha">
+                         <Button
+                            onClick={handleAtualizarCampanha}
+                            disabled={!selectedCampanha}
+                            icon={<SyncOutlined />}
+                         >
+                            ATUALIZAR
+                         </Button>
+                     </Tooltip>
                      <Tooltip title="Resetar todos os contatos e contadores">
                          <Button
                             onClick={handleResetarCampanha}
@@ -722,6 +794,8 @@ export default function Campanha() {
                                     <div style={{ fontWeight: 500 }}>{item.nome}</div>
                                     <div style={{ fontSize: 11, color: '#999' }}>{item.whatsapp}</div>
                                 </div>
+                                {item.resposta === 1 && <Tag color="green" style={{ marginLeft: 6 }}>SIM</Tag>}
+                                {item.resposta === 2 && <Tag color="red" style={{ marginLeft: 6 }}>NÃO</Tag>}
                             </Space>
                         </List.Item>
                     )}
@@ -744,7 +818,18 @@ export default function Campanha() {
                                  />
                              )}
                              <div style={{ fontSize: 14, lineHeight: '1.4', color: '#303030', whiteSpace: 'pre-wrap' }}>
-                                 {selectedCampanha.descricao || 'Sem texto'}
+                                 {(() => {
+                                    const config = (selectedCampanha as any)._config || {}
+                                    let msg = String(selectedCampanha.descricao || '').trim()
+                                    if (String(config.response_mode || '').toUpperCase() === 'SIM_NAO') {
+                                      const q = String(config.question || '').trim()
+                                      const parts = [msg]
+                                      if (q) parts.push(q)
+                                      parts.push('RESPONDA:\n1 - SIM\n2 - NÃO')
+                                      msg = parts.filter(Boolean).join('\n\n')
+                                    }
+                                    return msg || 'Sem texto'
+                                 })()}
                              </div>
                              <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', marginTop: 4, gap: 4 }}>
                                  <span style={{ fontSize: 11, color: '#999' }}>{dayjs().format('HH:mm')}</span>

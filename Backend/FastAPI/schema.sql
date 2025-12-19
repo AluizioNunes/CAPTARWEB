@@ -191,6 +191,14 @@ CREATE TABLE IF NOT EXISTS captar."Campanhas" (
     "Atualizacao" TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     "AnexoJSON" TEXT,
     "Imagem" TEXT,
+    "RecorrenciaAtiva" BOOLEAN DEFAULT FALSE,
+    "TotalBlocos" INTEGER DEFAULT 5,
+    "MensagensPorBloco" INTEGER DEFAULT 500,
+    "BlocosPorDia" INTEGER DEFAULT 1,
+    "IntervaloMinSeg" INTEGER DEFAULT 5,
+    "IntervaloMaxSeg" INTEGER DEFAULT 120,
+    "BlocoAtual" INTEGER DEFAULT 0,
+    "ProximaExecucao" TIMESTAMP,
     "IdTenant" INTEGER
 );
 

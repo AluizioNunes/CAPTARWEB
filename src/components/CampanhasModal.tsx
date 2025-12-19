@@ -1,4 +1,4 @@
-import { Avatar, Button, Card, DatePicker, Form, Input, Modal, Radio, Space, Upload, message } from 'antd'
+import { Avatar, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Radio, Space, Upload, message } from 'antd'
 import { CloseCircleOutlined, CloudUploadOutlined, FileTextOutlined, SaveOutlined, TeamOutlined, ThunderboltOutlined, UploadOutlined } from '@ant-design/icons'
 import { useEffect, useState, useMemo } from 'react'
 import { useApi } from '../context/ApiContext'
@@ -24,6 +24,7 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
   const [posicaoImagem, setPosicaoImagem] = useState<'top' | 'bottom'>('bottom')
   const [modoResposta, setModoResposta] = useState<'nenhum' | 'sim_nao'>('nenhum')
   const [perguntaSimNao, setPerguntaSimNao] = useState('')
+  const [recorrenciaAtiva, setRecorrenciaAtiva] = useState(false)
   
   const api = useApi()
   const { user } = useAuthStore()
@@ -94,6 +95,7 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
           data_inicio: initial.data_inicio ? dayjs(initial.data_inicio) : undefined,
           data_fim: initial.data_fim ? dayjs(initial.data_fim) : undefined,
         })
+        setRecorrenciaAtiva(!!initial.recorrencia_ativa)
 
         if (initial?.imagem) {
           setImagemList([{
@@ -140,12 +142,22 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
 
       } else {
         form.resetFields()
+        form.setFieldsValue({
+          recorrencia_ativa: false,
+          total_blocos: 5,
+          mensagens_por_bloco: 500,
+          blocos_por_dia: 1,
+          intervalo_min_seg: 5,
+          intervalo_max_seg: 120,
+          bloco_atual: 0,
+        })
         setDestino('eleitores')
         setFileList([])
         setImagemList([])
         setPosicaoImagem('bottom')
         setModoResposta('nenhum')
         setPerguntaSimNao('')
+        setRecorrenciaAtiva(false)
         
         // Reset stats
         setMeta(0)
@@ -219,6 +231,18 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
       if (modoResposta === 'sim_nao' && !String(perguntaSimNao || '').trim()) {
         messageApi.error('Informe a pergunta (SIM/NÃO)')
         return
+      }
+      if (values.recorrencia_ativa) {
+        const min = Number(values.intervalo_min_seg)
+        const max = Number(values.intervalo_max_seg)
+        if (!Number.isFinite(min) || !Number.isFinite(max) || min <= 0 || max <= 0) {
+          messageApi.error('Informe os intervalos mínimo e máximo em segundos')
+          return
+        }
+        if (min > max) {
+          messageApi.error('Intervalo mínimo não pode ser maior que o máximo')
+          return
+        }
       }
       
       // Helper to convert file to base64
@@ -458,6 +482,45 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
                    )}
                </div>
           </Form.Item>
+        </Card>
+
+        <Card title="RECORRÊNCIA / BLOCOS" size="small" style={{ marginTop: 16 }}>
+          <Form.Item name="recorrencia_ativa" label="ATIVAR RECORRÊNCIA" initialValue={false}>
+            <Radio.Group
+              value={recorrenciaAtiva}
+              onChange={(e) => {
+                setRecorrenciaAtiva(!!e.target.value)
+                form.setFieldsValue({ recorrencia_ativa: !!e.target.value })
+              }}
+            >
+              <Radio.Button value={false}>NÃO</Radio.Button>
+              <Radio.Button value={true}>SIM</Radio.Button>
+            </Radio.Group>
+          </Form.Item>
+
+          <Space style={{ display: 'flex', marginBottom: 8 }} align="start" wrap>
+            <Form.Item name="total_blocos" label="TOTAL DE BLOCOS" rules={recorrenciaAtiva ? [{ required: true }] : undefined}>
+              <InputNumber min={1} max={999} style={{ width: 160 }} />
+            </Form.Item>
+            <Form.Item name="mensagens_por_bloco" label="MENSAGENS POR BLOCO" rules={recorrenciaAtiva ? [{ required: true }] : undefined}>
+              <InputNumber min={1} max={5000} style={{ width: 200 }} />
+            </Form.Item>
+            <Form.Item name="blocos_por_dia" label="BLOCOS POR DIA" rules={recorrenciaAtiva ? [{ required: true }] : undefined}>
+              <InputNumber min={1} max={24} style={{ width: 160 }} />
+            </Form.Item>
+          </Space>
+
+          <Space style={{ display: 'flex', marginBottom: 8 }} align="start" wrap>
+            <Form.Item name="intervalo_min_seg" label="INTERVALO MÍNIMO (SEG)" rules={recorrenciaAtiva ? [{ required: true }] : undefined}>
+              <InputNumber min={1} max={3600} style={{ width: 200 }} />
+            </Form.Item>
+            <Form.Item name="intervalo_max_seg" label="INTERVALO MÁXIMO (SEG)" rules={recorrenciaAtiva ? [{ required: true }] : undefined}>
+              <InputNumber min={1} max={3600} style={{ width: 200 }} />
+            </Form.Item>
+            <Form.Item name="bloco_atual" label="BLOCO ATUAL">
+              <InputNumber min={0} max={999} style={{ width: 160 }} />
+            </Form.Item>
+          </Space>
         </Card>
 
         <Card title="DESTINATÁRIOS" size="small" style={{ marginTop: 16 }}>

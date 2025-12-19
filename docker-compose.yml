@@ -172,6 +172,7 @@ services:
       - DB_POSTGRESDB_DATABASE=${DB_NAME}
       - DB_POSTGRESDB_USER=${DB_USER}
       - DB_POSTGRESDB_PASSWORD=${DB_PASSWORD}
+      - DB_POSTGRESDB_SCHEMA=n8n
       - N8N_HOST=${DOMAIN_NAME}
       - N8N_PORT=5678
       - N8N_PROTOCOL=https
@@ -237,7 +238,7 @@ services:
       postgres:
         condition: service_healthy
     command: >
-      sh -lc "PGPASSWORD=${DB_PASSWORD} psql -h postgres -U ${DB_USER} -d ${DB_NAME} -c 'CREATE SCHEMA IF NOT EXISTS \"N8N\";' && PGPASSWORD=${DB_PASSWORD} psql -h postgres -U ${DB_USER} -d ${DB_NAME} -c 'SELECT 1;' && echo 'N8N schema ensured and DB connection validated'"
+      sh -lc "PGPASSWORD=${DB_PASSWORD} psql -v ON_ERROR_STOP=1 -h postgres -U ${DB_USER} -d ${DB_NAME} -c 'CREATE SCHEMA IF NOT EXISTS n8n; GRANT ALL ON SCHEMA n8n TO ${DB_USER};' && PGPASSWORD=${DB_PASSWORD} psql -v ON_ERROR_STOP=1 -h postgres -U ${DB_USER} -d ${DB_NAME} -c 'SELECT 1;' && echo 'n8n schema ensured and DB connection validated'"
     networks:
       - captar-network
     restart: "no"

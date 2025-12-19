@@ -576,6 +576,14 @@ class ApiService {
           { name: 'positivos', type: 'integer', nullable: true },
           { name: 'negativos', type: 'integer', nullable: true },
           { name: 'aguardando', type: 'integer', nullable: true },
+          { name: 'recorrencia_ativa', type: 'boolean', nullable: true },
+          { name: 'total_blocos', type: 'integer', nullable: true },
+          { name: 'mensagens_por_bloco', type: 'integer', nullable: true },
+          { name: 'blocos_por_dia', type: 'integer', nullable: true },
+          { name: 'intervalo_min_seg', type: 'integer', nullable: true },
+          { name: 'intervalo_max_seg', type: 'integer', nullable: true },
+          { name: 'bloco_atual', type: 'integer', nullable: true },
+          { name: 'proxima_execucao', type: 'datetime', nullable: true },
           { name: 'created_at', type: 'datetime', nullable: true },
         ]
       }

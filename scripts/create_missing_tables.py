@@ -15,7 +15,7 @@ with psycopg.connect(dsn) as conn:
     cur = conn.cursor()
     cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{DB_SCHEMA}"')
     cur.execute(f"""
-        CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.eleitores (
+        CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Eleitores" (
             id SERIAL PRIMARY KEY,
             nome VARCHAR(255),
             cpf VARCHAR(14),
@@ -28,7 +28,7 @@ with psycopg.connect(dsn) as conn:
         )
     """)
     cur.execute(f"""
-        CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.ativistas (
+        CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Ativistas" (
             id SERIAL PRIMARY KEY,
             nome VARCHAR(255),
             tipo_apoio VARCHAR(120),

@@ -567,7 +567,7 @@ class ApiService {
           { name: 'id', type: 'integer', nullable: false },
           { name: 'nome', type: 'string', nullable: false },
           { name: 'descricao', type: 'text', nullable: true },
-          { name: 'status', type: 'string', nullable: true },
+          { name: 'status', type: 'boolean', nullable: true },
           { name: 'data_inicio', type: 'date', nullable: false },
           { name: 'data_fim', type: 'date', nullable: true },
           { name: 'meta', type: 'integer', nullable: true },
@@ -1046,6 +1046,23 @@ class ApiService {
   
   async testEvolutionApi(): Promise<{ ok: boolean; status_code: number; message?: string; version?: string }> {
     const response = await this.api.get('/integracoes/evolution/test')
+    return response.data
+  }
+
+  // ==================== CONFIGURAÇÕES & INTEGRAÇÕES ====================
+
+  async getConfiguracoes(categoria?: string): Promise<any[]> {
+    const response = await this.api.get('/configuracoes', { params: { categoria } })
+    return response.data
+  }
+
+  async updateConfiguracao(chave: string, valor: string): Promise<any> {
+    const response = await this.api.put(`/configuracoes/${chave}`, { valor })
+    return response.data
+  }
+
+  async sendWhatsAppMessage(phone: string, message: string, media?: string, textPosition?: 'top' | 'bottom'): Promise<any> {
+    const response = await this.api.post('/integrations/whatsapp/send', { phone, message, media_url: media, text_position: textPosition })
     return response.data
   }
 }

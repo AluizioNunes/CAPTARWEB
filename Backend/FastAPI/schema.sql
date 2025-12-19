@@ -167,24 +167,31 @@ CREATE TABLE IF NOT EXISTS captar.interacoes (
     criado_por INTEGER,
     criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_interacao_eleitor FOREIGN KEY (eleitor_id) REFERENCES captar.eleitores(id) ON DELETE CASCADE,
-    CONSTRAINT fk_interacao_ativista FOREIGN KEY (ativista_id) REFERENCES captar.ativistas(id) ON DELETE SET NULL,
+    CONSTRAINT fk_interacao_eleitor FOREIGN KEY (eleitor_id) REFERENCES captar."Eleitores"("IdEleitor") ON DELETE CASCADE,
+    CONSTRAINT fk_interacao_ativista FOREIGN KEY (ativista_id) REFERENCES captar."Ativistas"("IdAtivista") ON DELETE SET NULL,
     CONSTRAINT fk_interacao_criado_por FOREIGN KEY (criado_por) REFERENCES captar.usuarios(id) ON DELETE SET NULL
 );
 
 -- 9. Tabela de Campanhas
-CREATE TABLE IF NOT EXISTS captar.campanhas (
-    id SERIAL PRIMARY KEY,
-    nome VARCHAR(255) NOT NULL,
-    descricao TEXT,
-    data_inicio DATE NOT NULL,
-    data_fim DATE,
-    orcamento DECIMAL(15, 2),
-    status VARCHAR(50) DEFAULT 'PLANEJAMENTO',  -- PLANEJAMENTO, EM_ANDAMENTO, CONCLUIDA, CANCELADA
-    criado_por INTEGER,
-    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_campanha_criado_por FOREIGN KEY (criado_por) REFERENCES captar.usuarios(id) ON DELETE SET NULL
+CREATE TABLE IF NOT EXISTS captar."Campanhas" (
+    "IdCampanha" SERIAL PRIMARY KEY,
+    "NomeCampanha" VARCHAR(255),
+    "Texto" TEXT,
+    "DataInicio" DATE,
+    "DataFim" DATE,
+    "Status" VARCHAR(50),
+    "Meta" INTEGER DEFAULT 0,
+    "Enviados" INTEGER DEFAULT 0,
+    "NaoEnviados" INTEGER DEFAULT 0,
+    "Positivos" INTEGER DEFAULT 0,
+    "Negativos" INTEGER DEFAULT 0,
+    "Aguardando" INTEGER DEFAULT 0,
+    "Cadastrante" VARCHAR(255),
+    "DataCriacao" TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    "Atualizacao" TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    "AnexoJSON" TEXT,
+    "Imagem" TEXT,
+    "IdTenant" INTEGER
 );
 
 -- 10. Tabela de Ações de Campanha
@@ -202,7 +209,7 @@ CREATE TABLE IF NOT EXISTS captar.acoes_campanha (
     resultado TEXT,
     criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_acao_campanha FOREIGN KEY (campanha_id) REFERENCES captar.campanhas(id) ON DELETE CASCADE,
+    CONSTRAINT fk_acao_campanha FOREIGN KEY (campanha_id) REFERENCES captar."Campanhas"(id) ON DELETE CASCADE,
     CONSTRAINT fk_acao_responsavel FOREIGN KEY (responsavel_id) REFERENCES captar.usuarios(id) ON DELETE SET NULL
 );
 
@@ -217,7 +224,7 @@ CREATE TABLE IF NOT EXISTS captar.participacoes_acao (
     criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_participacao_acao FOREIGN KEY (acao_id) REFERENCES captar.acoes_campanha(id) ON DELETE CASCADE,
-    CONSTRAINT fk_participacao_ativista FOREIGN KEY (ativista_id) REFERENCES captar.ativistas(id) ON DELETE CASCADE,
+    CONSTRAINT fk_participacao_ativista FOREIGN KEY (ativista_id) REFERENCES captar."Ativistas"("IdAtivista") ON DELETE CASCADE,
     CONSTRAINT uq_participacao_acao_ativista UNIQUE (acao_id, ativista_id)
 );
 
@@ -352,14 +359,14 @@ INSERT INTO captar.configuracoes (chave, valor, descricao, tipo_dado, categoria)
 ON CONFLICT (chave) DO NOTHING;
 
 -- Criar índices para melhorar desempenho
-CREATE INDEX IF NOT EXISTS idx_eleitores_nome ON captar.eleitores(nome);
-CREATE INDEX IF NOT EXISTS idx_eleitores_cpf ON captar.eleitores(cpf);
-CREATE INDEX IF NOT EXISTS idx_eleitores_cidade ON captar.eleitores(cidade);
-CREATE INDEX IF NOT EXISTS idx_eleitores_bairro ON captar.eleitores(bairro);
+CREATE INDEX IF NOT EXISTS idx_eleitores_nome ON captar."Eleitores"("Nome");
+CREATE INDEX IF NOT EXISTS idx_eleitores_cpf ON captar."Eleitores"("CPF");
+CREATE INDEX IF NOT EXISTS idx_eleitores_cidade ON captar."Eleitores"("Cidade");
+CREATE INDEX IF NOT EXISTS idx_eleitores_bairro ON captar."Eleitores"("Bairro");
 
-CREATE INDEX IF NOT EXISTS idx_ativistas_nome ON captar.ativistas(nome);
-CREATE INDEX IF NOT EXISTS idx_ativistas_cpf ON captar.ativistas(cpf);
-CREATE INDEX IF NOT EXISTS idx_ativistas_cidade ON captar.ativistas(cidade);
+CREATE INDEX IF NOT EXISTS idx_ativistas_nome ON captar."Ativistas"("Nome");
+CREATE INDEX IF NOT EXISTS idx_ativistas_cpf ON captar."Ativistas"("CPF");
+CREATE INDEX IF NOT EXISTS idx_ativistas_cidade ON captar."Ativistas"("Cidade");
 
 CREATE INDEX IF NOT EXISTS idx_interacoes_eleitor ON captar.interacoes(eleitor_id);
 CREATE INDEX IF NOT EXISTS idx_interacoes_ativista ON captar.interacoes(ativista_id);

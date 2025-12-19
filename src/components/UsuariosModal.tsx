@@ -1,4 +1,4 @@
-import { Modal, Form, Input, Checkbox, Button, Space, InputNumber, DatePicker, Select, Card, Avatar, Switch, message } from 'antd'
+import { Modal, Form, Input, Checkbox, Button, Space, InputNumber, DatePicker, Select, Card, Avatar, Switch, App } from 'antd'
 import { UserOutlined, IdcardOutlined, CrownOutlined, TagOutlined, PhoneOutlined, MailOutlined, UserSwitchOutlined, LockOutlined, SaveOutlined, CloseCircleOutlined } from '@ant-design/icons'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useApi } from '../context/ApiContext'
@@ -26,6 +26,7 @@ export default function UsuariosModal({ open, initial, onCancel, onSaved }: Prop
   const [superTenantMap, setSuperTenantMap] = useState<Record<string, string>>({})
   const [tenantOptions, setTenantOptions] = useState<{ value: string; label: string; slug?: string }[]>([])
   const api = useApi()
+  const { message } = App.useApp()
   
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const [webcamStream, setWebcamStream] = useState<MediaStream | null>(null)

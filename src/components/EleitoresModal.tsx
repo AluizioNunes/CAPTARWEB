@@ -1,4 +1,4 @@
-import { Modal, Form, Input, Button, message, Select, DatePicker, Avatar, Card } from 'antd'
+import { Modal, Form, Input, Button, Select, DatePicker, Avatar, Card, App } from 'antd'
 import { UserOutlined, IdcardOutlined, PhoneOutlined, EnvironmentOutlined, NumberOutlined } from '@ant-design/icons'
 import { useEffect, useMemo, useState } from 'react'
 import { useApi } from '../context/ApiContext'
@@ -21,6 +21,7 @@ export default function EleitoresModal({ open, initial, onCancel, onSaved }: Pro
   const [tenantOptions, setTenantOptions] = useState<{ value: string; label: string; slug?: string }[]>([])
   const api = useApi()
   const { user } = useAuthStore()
+  const { message } = App.useApp()
 
   // Header Logic (Login time, etc)
   const loginDateObj = useMemo(() => {

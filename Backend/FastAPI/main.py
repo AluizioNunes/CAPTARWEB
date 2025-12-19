@@ -3,7 +3,8 @@ CAPTAR API - Extended Version with All Improvements
 Integração de todas as 15 melhorias prioritárias
 """
 
-from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, BackgroundTasks, Request
+from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, BackgroundTasks, Request, Form
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
@@ -22,7 +23,7 @@ import json
 import csv
 import io
 import pandas as pd
-from typing import List, Optional, Dict, Tuple
+from typing import Any, List, Optional, Dict, Tuple, Union
 import time
 from urllib.request import urlopen
 import urllib.request
@@ -33,6 +34,9 @@ import zlib
 import base64
 import re
 import pathlib
+import aiohttp
+import traceback
+import uuid
 
 load_dotenv()
 
@@ -79,6 +83,13 @@ app = FastAPI(
     description="Sistema de Gestão Eleitoral com 15 Melhorias Prioritárias"
 )
 
+# Static Files
+try:
+    os.makedirs("static", exist_ok=True)
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+except Exception as e:
+    print(f"Warning: Could not mount static directory: {e}")
+
 # CORS Middleware
 app.add_middleware(
     CORSMiddleware,
@@ -100,6 +111,57 @@ def _get_pool(dsn: str) -> any:
     pool = ConnectionPool(dsn, max_size=10, timeout=30) if ConnectionPool else None
     _POOLS[dsn] = (pool, now + _POOL_TTL_SECONDS)
     return pool
+
+_IMAGE_DATA_URL_RE = re.compile(r'^data:(image/[a-zA-Z0-9.+-]+);base64,(.*)$', re.DOTALL)
+
+def _guess_image_ext(b: bytes) -> str:
+    if b.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'png'
+    if b.startswith(b'\xff\xd8\xff'):
+        return 'jpg'
+    if b.startswith(b'GIF87a') or b.startswith(b'GIF89a'):
+        return 'gif'
+    if b.startswith(b'RIFF') and b[8:12] == b'WEBP':
+        return 'webp'
+    return 'png'
+
+def _normalize_campanha_imagem(raw: str, tid: int) -> Optional[str]:
+    s = str(raw or '').strip()
+    if not s:
+        return None
+    if s.startswith('http://') or s.startswith('https://') or s.startswith('/static/') or s.startswith('static/'):
+        return s if s.startswith('/') else f'/{s}'
+    if s.startswith('data:'):
+        m = _IMAGE_DATA_URL_RE.match(s)
+        if not m:
+            return None
+        mime = m.group(1)
+        b64 = m.group(2)
+        ext = (mime.split('/')[-1] or 'png').lower()
+        if ext == 'jpeg':
+            ext = 'jpg'
+        data = base64.b64decode(b64)
+        os.makedirs(os.path.join(os.getcwd(), 'static', 'campanhas'), exist_ok=True)
+        filename = f'{tid}_{uuid.uuid4().hex}.{ext}'
+        full_path = os.path.join(os.getcwd(), 'static', 'campanhas', filename)
+        with open(full_path, 'wb') as f:
+            f.write(data)
+        return f'/static/campanhas/{filename}'
+    try:
+        data = base64.b64decode(s)
+    except Exception:
+        if s.startswith('/'):
+            return s
+        return s
+    if not data:
+        return None
+    ext = _guess_image_ext(data)
+    os.makedirs(os.path.join(os.getcwd(), 'static', 'campanhas'), exist_ok=True)
+    filename = f'{tid}_{uuid.uuid4().hex}.{ext}'
+    full_path = os.path.join(os.getcwd(), 'static', 'campanhas', filename)
+    with open(full_path, 'wb') as f:
+        f.write(data)
+    return f'/static/campanhas/{filename}'
 
 @contextmanager
 def get_db_connection(dsn: str | None = None):
@@ -314,48 +376,432 @@ async def tenants_set_dsn(slug: str, body: SetDsnRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ==================== CONFIGURAÇÕES & INTEGRAÇÕES ====================
+
+class ConfigUpdate(BaseModel):
+    valor: str
+
+@app.get("/api/configuracoes")
+async def get_configuracoes(categoria: Optional[str] = None):
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            if categoria:
+                cursor.execute(f"SELECT chave, valor, descricao, categoria FROM \"{DB_SCHEMA}\".configuracoes WHERE categoria = %s", (categoria,))
+            else:
+                cursor.execute(f"SELECT chave, valor, descricao, categoria FROM \"{DB_SCHEMA}\".configuracoes")
+            
+            rows = cursor.fetchall()
+            return [
+                {"chave": r[0], "valor": r[1], "descricao": r[2], "categoria": r[3]} 
+                for r in rows
+            ]
+    except Exception as e:
+        # If table doesn't exist yet, return empty
+        return []
+
+@app.put("/api/configuracoes/{chave}")
+async def update_configuracao(chave: str, config: ConfigUpdate, request: Request):
+    try:
+        # Check permissions here if needed (e.g. only Admin)
+        user = _extract_user_from_auth(request) # Helper might raise if not auth, assuming it exists or we skip for now
+        
+        with get_conn_for_request(request) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE \"{DB_SCHEMA}\".configuracoes SET valor = %s, atualizado_em = NOW() WHERE chave = %s",
+                (config.valor, chave)
+            )
+            conn.commit()
+            return {"message": "Configuração atualizada"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class WhatsAppSendRequest(BaseModel):
+    phone: str
+    message: str
+    media_url: Optional[str] = None
+    media_type: Optional[str] = "image"
+    text_position: Optional[str] = "bottom" # bottom (caption) or top (text then image)
+
+@app.post("/api/integrations/whatsapp/send")
+async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
+    try:
+        # 1. Get Configs
+        with get_conn_for_request(request) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT chave, valor FROM \"{DB_SCHEMA}\".configuracoes WHERE chave IN ('WHATSAPP_INSTANCE_NAME', 'WHATSAPP_API_KEY', 'WHATSAPP_API_URL')"
+            )
+            rows = cursor.fetchall()
+            config = {r[0]: r[1] for r in rows}
+        
+        instance = config.get('WHATSAPP_INSTANCE_NAME')
+        api_key = config.get('WHATSAPP_API_KEY')
+        base_url = config.get('WHATSAPP_API_URL')
+        
+        if not instance or not api_key or not base_url:
+            raise HTTPException(status_code=500, detail="Configuração do WhatsApp incompleta no servidor.")
+            
+        # 1.5. Resolve Media URL if local filename
+        final_media_url = data.media_url
+        if final_media_url:
+            s_media = str(final_media_url).strip()
+            # If not http/https and not data: -> assume local file in static/campanhas
+            if not s_media.startswith('http') and not s_media.startswith('data:'):
+                media_base_url = os.getenv("WHATSAPP_MEDIA_BASE_URL")
+                if not media_base_url:
+                    fastapi_host_port = os.getenv("FASTAPI_HOST_PORT", "8001")
+                    media_base_url = f"http://host.docker.internal:{fastapi_host_port}"
+                media_base_url = str(media_base_url).rstrip("/")
+                if s_media.startswith('/static/') or s_media.startswith('/'):
+                    final_media_url = f"{media_base_url}{s_media}"
+                elif s_media.startswith('static/'):
+                    final_media_url = f"{media_base_url}/{s_media}"
+                else:
+                    final_media_url = f"{media_base_url}/static/campanhas/{s_media}"
+                print(f"Resolved local media path '{s_media}' to '{final_media_url}'")
+
+        # 2. Call Evolution API
+        headers = {
+            "apikey": api_key,
+            "Content-Type": "application/json"
+        }
+
+        async with aiohttp.ClientSession() as session:
+            # Logic for Text Position
+            if final_media_url and data.text_position == 'top':
+                # 1. Send Text First
+                url_text = f"{base_url}/message/sendText/{instance}"
+                payload_text = {
+                    "number": data.phone,
+                    "text": data.message,
+                    "delay": 1200,
+                    "linkPreview": True
+                }
+                print(f"Sending WhatsApp TEXT (TOP) to URL: {url_text}")
+                async with session.post(url_text, json=payload_text, headers=headers, timeout=30) as resp_text:
+                    if resp_text.status not in (200, 201):
+                        text = await resp_text.text()
+                        print(f"Evolution API Error (Text): {resp_text.status} - {text}")
+                        # Don't fail completely if text fails? Or fail? Let's fail.
+                        code = resp_text.status if resp_text.status < 500 else 502
+                        raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp (Texto): {text}")
+                
+                # 2. Send Image Second (No Caption)
+                url_media = f"{base_url}/message/sendMedia/{instance}"
+                print(f"Sending WhatsApp MEDIA (TOP) to URL: {url_media}")
+                payload_media = {
+                    "number": data.phone,
+                    "mediatype": "image",
+                    "media": final_media_url,
+                    "delay": 1200,
+                    "linkPreview": True
+                }
+                async with session.post(url_media, json=payload_media, headers=headers, timeout=30) as resp_media:
+                    if resp_media.status not in (200, 201):
+                        text = await resp_media.text()
+                        code = resp_media.status if resp_media.status < 500 else 502
+                        raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp (Mídia): {text}")
+                    return await resp_media.json()
+
+            elif final_media_url:
+                # Standard: Image with Caption (Bottom)
+                # Endpoint: /message/sendMedia/{instance}
+                url = f"{base_url}/message/sendMedia/{instance}"
+                print(f"Sending WhatsApp MEDIA (BOTTOM) to URL: {url} with Instance: {instance}")
+                
+                payload = {
+                    "number": data.phone,
+                    "mediatype": "image",
+                    "caption": data.message,
+                    "media": final_media_url,
+                    "delay": 1200,
+                    "linkPreview": True
+                }
+                async with session.post(url, json=payload, headers=headers, timeout=30) as response:
+                    if response.status not in (200, 201):
+                        text = await response.text()
+                        print(f"Evolution API Error: {response.status} - {text}")
+                        code = response.status if response.status < 500 else 502
+                        raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp: {text}")
+                    return await response.json()
+            
+            else:
+                # Text Only
+                url = f"{base_url}/message/sendText/{instance}"
+                print(f"Sending WhatsApp TEXT to URL: {url} with Instance: {instance}")
+                
+                payload = {
+                    "number": data.phone,
+                    "text": data.message,
+                    "delay": 1200,
+                    "linkPreview": True
+                }
+                
+                async with session.post(url, json=payload, headers=headers, timeout=30) as response:
+                    if response.status not in (200, 201):
+                        text = await response.text()
+                        print(f"Evolution API Error: {response.status} - {text}")
+                        code = response.status if response.status < 500 else 502
+                        raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp: {text}")
+                    return await response.json()
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Error sending whatsapp: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+def _digits_only(s: Any) -> str:
+    try:
+        return ''.join([c for c in str(s or '') if c.isdigit()])
+    except Exception:
+        return ''
+
+def _extract_evolution_text(payload: Any) -> str:
+    try:
+        if payload is None:
+            return ''
+        if isinstance(payload, str):
+            return payload
+        if isinstance(payload, dict):
+            for k in ('text', 'message', 'body', 'content', 'mensagem'):
+                v = payload.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v
+            data = payload.get('data') or payload.get('event') or payload.get('payload')
+            if isinstance(data, dict):
+                for k in ('text', 'message', 'body', 'content'):
+                    v = data.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v
+                msg = data.get('message')
+                if isinstance(msg, dict):
+                    for k in ('text', 'body', 'content'):
+                        v = msg.get(k)
+                        if isinstance(v, str) and v.strip():
+                            return v
+        return ''
+    except Exception:
+        return ''
+
+def _extract_evolution_number(payload: Any) -> str:
+    try:
+        if payload is None:
+            return ''
+        if isinstance(payload, dict):
+            for k in ('from', 'number', 'phone', 'remoteJid', 'sender'):
+                v = payload.get(k)
+                if v:
+                    d = _digits_only(v)
+                    if d:
+                        return d
+            data = payload.get('data') or payload.get('event') or payload.get('payload')
+            if isinstance(data, dict):
+                for k in ('from', 'number', 'phone', 'remoteJid', 'sender'):
+                    v = data.get(k)
+                    if v:
+                        d = _digits_only(v)
+                        if d:
+                            return d
+                key = data.get('key')
+                if isinstance(key, dict) and key.get('remoteJid'):
+                    d = _digits_only(key.get('remoteJid'))
+                    if d:
+                        return d
+        return ''
+    except Exception:
+        return ''
+
+def _match_phone(stored: Any, incoming_digits: str) -> bool:
+    a = _digits_only(stored)
+    b = _digits_only(incoming_digits)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if len(a) >= 10 and b.endswith(a[-10:]):
+        return True
+    if len(b) >= 10 and a.endswith(b[-10:]):
+        return True
+    return False
+
+@app.post("/api/integrations/whatsapp/webhook")
+async def whatsapp_webhook(payload: Dict[str, Any], request: Request):
+    try:
+        tid = _tenant_id_from_header(request)
+        incoming_text = _extract_evolution_text(payload).strip()
+        incoming_digits = _extract_evolution_number(payload)
+        if not incoming_text or not incoming_digits:
+            return {"ok": True, "ignored": True}
+
+        t = incoming_text.strip()
+        if t not in ('1', '2'):
+            return {"ok": True, "ignored": True}
+        resposta = 1 if t == '1' else 2
+
+        with get_conn_for_request(request) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT "IdCampanha"
+                FROM "{DB_SCHEMA}"."Campanhas"
+                WHERE "IdTenant" = %s
+                  AND COALESCE("AnexoJSON"->'config'->>'response_mode', '') = 'SIM_NAO'
+                ORDER BY "IdCampanha" DESC
+                """,
+                (tid,)
+            )
+            ids = [r[0] for r in cursor.fetchall()]
+            for campanha_id in ids:
+                cursor.execute(
+                    f"""
+                    SELECT "AnexoJSON", "Positivos", "Negativos", "Aguardando"
+                    FROM "{DB_SCHEMA}"."Campanhas"
+                    WHERE "IdCampanha" = %s AND "IdTenant" = %s
+                    FOR UPDATE
+                    """,
+                    (campanha_id, tid)
+                )
+                locked = cursor.fetchone()
+                if not locked:
+                    conn.rollback()
+                    continue
+
+                anexo = locked[0]
+                positivos = int(locked[1] or 0)
+                negativos = int(locked[2] or 0)
+                aguardando = int(locked[3] or 0)
+
+                if not anexo:
+                    conn.rollback()
+                    continue
+
+                anexo_obj: Any = anexo
+                if isinstance(anexo_obj, str):
+                    try:
+                        anexo_obj = json.loads(anexo_obj)
+                    except Exception:
+                        conn.rollback()
+                        continue
+
+                if isinstance(anexo_obj, list):
+                    anexo_obj = {"contacts": anexo_obj, "config": {"response_mode": "SIM_NAO"}}
+
+                if not isinstance(anexo_obj, dict):
+                    conn.rollback()
+                    continue
+
+                contacts = anexo_obj.get('contacts')
+                if not isinstance(contacts, list):
+                    conn.rollback()
+                    continue
+
+                idx_match = -1
+                for i, c in enumerate(contacts):
+                    if not isinstance(c, dict):
+                        continue
+                    phone = c.get('whatsapp') or c.get('celular') or c.get('telefone') or c.get('phone')
+                    if _match_phone(phone, incoming_digits):
+                        idx_match = i
+                        break
+
+                if idx_match < 0:
+                    conn.rollback()
+                    continue
+
+                cur = contacts[idx_match]
+                status_val = cur.get('status') if isinstance(cur, dict) else None
+                if str(status_val or '').lower() != 'success':
+                    conn.rollback()
+                    continue
+                existing = cur.get('resposta') if isinstance(cur, dict) else None
+                if existing in (1, 2, '1', '2'):
+                    conn.rollback()
+                    return {"ok": True, "ignored": True, "already": True, "campanha_id": campanha_id}
+
+                cur['resposta'] = resposta
+                cur['respondido_em'] = datetime.utcnow().isoformat()
+                contacts[idx_match] = cur
+                anexo_obj['contacts'] = contacts
+
+                if resposta == 1:
+                    positivos += 1
+                else:
+                    negativos += 1
+                aguardando = max(0, aguardando - 1)
+
+                cursor.execute(
+                    f"""
+                    UPDATE "{DB_SCHEMA}"."Campanhas"
+                    SET "AnexoJSON" = %s::jsonb,
+                        "Positivos" = %s,
+                        "Negativos" = %s,
+                        "Aguardando" = %s,
+                        "Atualizacao" = NOW()
+                    WHERE "IdCampanha" = %s AND "IdTenant" = %s
+                    """,
+                    (json.dumps(anexo_obj, ensure_ascii=False), positivos, negativos, aguardando, campanha_id, tid)
+                )
+                conn.commit()
+                return {"ok": True, "campanha_id": campanha_id, "resposta": resposta}
+
+            conn.rollback()
+            return {"ok": True, "ignored": True}
+    except Exception as e:
+        try:
+            traceback.print_exc()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ==================== 5. CAMPANHAS ====================
 
 class CampanhaCreate(BaseModel):
     nome: str
     descricao: Optional[str] = None
-    data_inicio: str
+    data_inicio: Optional[str] = None
     data_fim: Optional[str] = None
-    status: Optional[str] = 'PLANEJAMENTO'
+    status: Optional[Union[bool, str]] = True
     meta: Optional[int] = 0
     enviados: Optional[int] = 0
     nao_enviados: Optional[int] = 0
     positivos: Optional[int] = 0
     negativos: Optional[int] = 0
     aguardando: Optional[int] = 0
-    # Campos auxiliares para lógica de frontend
-    UsarEleitores: Optional[bool] = False
+    anexo_json: Optional[Union[str, Dict, List]] = None
+    imagem: Optional[str] = None
+    usar_eleitores: Optional[bool] = False
     
 class CampanhaUpdate(BaseModel):
     nome: Optional[str] = None
     descricao: Optional[str] = None
     data_inicio: Optional[str] = None
     data_fim: Optional[str] = None
-    status: Optional[str] = None
+    status: Optional[Union[bool, str]] = None
     meta: Optional[int] = None
     enviados: Optional[int] = None
     nao_enviados: Optional[int] = None
     positivos: Optional[int] = None
     negativos: Optional[int] = None
     aguardando: Optional[int] = None
+    anexo_json: Optional[Union[str, Dict, List]] = None
+    imagem: Optional[str] = None
 
 @app.get("/api/campanhas/schema")
 async def campanhas_schema():
     try:
-        # Retorna schema compatível com o frontend
+        # Retorna schema compatível com o frontend (baseado na nova tabela, mapeado para legacy keys)
         return {
             "columns": [
                 {"name": "id", "type": "integer", "nullable": False},
                 {"name": "nome", "type": "string", "nullable": False},
                 {"name": "descricao", "type": "text", "nullable": True},
-                {"name": "data_inicio", "type": "date", "nullable": False},
+                {"name": "data_inicio", "type": "date", "nullable": True},
                 {"name": "data_fim", "type": "date", "nullable": True},
-                {"name": "status", "type": "string", "nullable": True},
+                {"name": "status", "type": "boolean", "nullable": True},
                 {"name": "meta", "type": "integer", "nullable": True},
                 {"name": "enviados", "type": "integer", "nullable": True},
                 {"name": "nao_enviados", "type": "integer", "nullable": True},
@@ -364,6 +810,7 @@ async def campanhas_schema():
                 {"name": "aguardando", "type": "integer", "nullable": True},
                 {"name": "created_at", "type": "timestamp", "nullable": True},
                 {"name": "updated_at", "type": "timestamp", "nullable": True},
+                {"name": "cadastrante", "type": "string", "nullable": True},
             ]
         }
     except Exception as e:
@@ -372,31 +819,56 @@ async def campanhas_schema():
 @app.get("/api/campanhas")
 async def campanhas_list(limit: int = 1000, request: Request = None):
     try:
-        with get_db_connection() as conn:
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
             tid = _tenant_id_from_header(request)
             
             # Verificar se tabela existe
             try:
-                cursor.execute(f"SELECT 1 FROM {DB_SCHEMA}.campanhas LIMIT 1")
+                cursor.execute(f"SELECT 1 FROM \"{DB_SCHEMA}\".\"Campanhas\" LIMIT 1")
             except:
                 conn.rollback()
                 return {"rows": [], "columns": []}
 
             cursor.execute(
                 f"""
-                SELECT id, nome, descricao, data_inicio, data_fim, status, 
-                       meta, enviados, nao_enviados, positivos, negativos, aguardando,
-                       criado_em as created_at
-                FROM {DB_SCHEMA}.campanhas 
-                WHERE "IdTenant" = %s OR "IdTenant" IS NULL
-                ORDER BY id DESC LIMIT %s
+                SELECT "IdCampanha" as id, "NomeCampanha" as nome, "Texto" as descricao, 
+                       "DataInicio" as data_inicio, "DataFim" as data_fim, "Status" as status, 
+                       "Meta" as meta, "Enviados" as enviados, "NaoEnviados" as nao_enviados, 
+                       "Positivos" as positivos, "Negativos" as negativos, "Aguardando" as aguardando,
+                       "Cadastrante" as cadastrante, "DataCriacao" as created_at, "Atualizacao" as updated_at, 
+                       "AnexoJSON" as conteudo_arquivo, "Imagem" as imagem
+                FROM "{DB_SCHEMA}"."Campanhas" 
+                WHERE "IdTenant" = %s
+                ORDER BY "IdCampanha" DESC LIMIT %s
                 """,
                 (tid, limit)
             )
             colnames = [desc[0] for desc in cursor.description]
             rows = cursor.fetchall()
-            data = [dict(zip(colnames, row)) for row in rows]
+            data = []
+            for row in rows:
+                d = dict(zip(colnames, row))
+                # Map conteudo_arquivo (AnexoJSON) to string if it's a dict/list (for frontend compatibility)
+                if isinstance(d.get('conteudo_arquivo'), (dict, list)):
+                    d['conteudo_arquivo'] = json.dumps(d['conteudo_arquivo'])
+                
+                # Extract usar_eleitores from conteudo_arquivo if present
+                d['usar_eleitores'] = False
+                if d.get('conteudo_arquivo'):
+                    try:
+                        ca = d['conteudo_arquivo']
+                        if isinstance(ca, str):
+                            ca_obj = json.loads(ca)
+                            if isinstance(ca_obj, dict) and ca_obj.get('usar_eleitores'):
+                                d['usar_eleitores'] = True
+                        elif isinstance(ca, dict) and ca.get('usar_eleitores'):
+                             d['usar_eleitores'] = True
+                    except:
+                        pass
+
+                data.append(d)
+            
             return {"rows": data, "columns": colnames}
     except Exception as e:
         print(f"Error listing campanhas: {e}")
@@ -407,29 +879,61 @@ async def campanhas_create(campanha: CampanhaCreate, request: Request):
     try:
         user_info = _extract_user_from_auth(request)
         tid = _tenant_id_from_header(request)
+        cadastrante = user_info.get('nome') or user_info.get('email') or str(user_info.get('id', 'Unknown'))
         
-        with get_db_connection() as conn:
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
+            # AnexoJSON handling
+            anexo_json = None
+            if campanha.anexo_json:
+                if isinstance(campanha.anexo_json, (dict, list)):
+                    anexo_json = json.dumps(campanha.anexo_json)
+                else:
+                    anexo_json = campanha.anexo_json
+            elif campanha.usar_eleitores:
+                 # If using eleitores, we can store a marker or config in AnexoJSON
+                 anexo_json = json.dumps({"source": "eleitores", "usar_eleitores": True})
+            
+            # Status handling (ensure boolean)
+            status_val = True
+            if campanha.status is not None:
+                if isinstance(campanha.status, bool):
+                    status_val = campanha.status
+                else:
+                    s_str = str(campanha.status).lower()
+                    if s_str in ('false', '0', 'inativo', 'off'):
+                        status_val = False
+                    else:
+                        status_val = True
+
+            imagem_db = None
+            if campanha.imagem:
+                imagem_db = _normalize_campanha_imagem(campanha.imagem, tid)
+
             cursor.execute(
                 f"""
-                INSERT INTO {DB_SCHEMA}.campanhas 
-                (nome, descricao, data_inicio, data_fim, status, meta, enviados, nao_enviados, positivos, negativos, aguardando, criado_por, "IdTenant")
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
+                INSERT INTO "{DB_SCHEMA}"."Campanhas" 
+                ("NomeCampanha", "Texto", "DataInicio", "DataFim", "Status", 
+                 "Meta", "Enviados", "NaoEnviados", "Positivos", "Negativos", "Aguardando", 
+                 "Cadastrante", "DataCriacao", "Atualizacao", "AnexoJSON", "Imagem", "IdTenant")
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), %s::jsonb, %s, %s)
+                RETURNING "IdCampanha"
                 """,
                 (
                     campanha.nome, 
                     campanha.descricao, 
                     campanha.data_inicio, 
                     campanha.data_fim, 
-                    campanha.status,
+                    status_val,
                     campanha.meta,
                     campanha.enviados,
                     campanha.nao_enviados,
                     campanha.positivos,
                     campanha.negativos,
                     campanha.aguardando,
-                    user_info['id'],
+                    cadastrante,
+                    anexo_json,
+                    imagem_db,
                     tid
                 )
             )
@@ -437,6 +941,7 @@ async def campanhas_create(campanha: CampanhaCreate, request: Request):
             conn.commit()
             return {"id": new_id, "message": "Campanha criada com sucesso"}
     except Exception as e:
+        print(f"Error creating campanha: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/campanhas/{id}")
@@ -447,33 +952,75 @@ async def campanhas_update(id: int, campanha: CampanhaUpdate, request: Request):
         if not data:
              raise HTTPException(status_code=400, detail="Nenhum dado para atualizar")
         
+        # Map frontend keys to DB columns
+        key_map = {
+            'nome': 'NomeCampanha',
+            'descricao': 'Texto',
+            'data_inicio': 'DataInicio',
+            'data_fim': 'DataFim',
+            'status': 'Status',
+            'meta': 'Meta',
+            'enviados': 'Enviados',
+            'nao_enviados': 'NaoEnviados',
+            'positivos': 'Positivos',
+            'negativos': 'Negativos',
+            'aguardando': 'Aguardando',
+            'anexo_json': 'AnexoJSON',
+            'imagem': 'Imagem'
+        }
+        
+        # Ensure AnexoJSON is serialized
+        if 'anexo_json' in data and data['anexo_json'] is not None:
+             if not isinstance(data['anexo_json'], str):
+                 data['anexo_json'] = json.dumps(data['anexo_json'])
+
+        # Ensure Status is boolean
+        if 'status' in data and data['status'] is not None:
+             if not isinstance(data['status'], bool):
+                 s_str = str(data['status']).lower()
+                 data['status'] = False if s_str in ('false', '0', 'inativo', 'off') else True
+
+        if 'imagem' in data and data['imagem'] is not None:
+            data['imagem'] = _normalize_campanha_imagem(data['imagem'], tid)
+
         set_parts = []
         values = []
         for k, v in data.items():
-            set_parts.append(f"{k} = %s")
-            values.append(v)
+            if k in key_map:
+                if k == 'anexo_json':
+                     set_parts.append(f"\"{key_map[k]}\" = %s::jsonb")
+                else:
+                     set_parts.append(f"\"{key_map[k]}\" = %s")
+                values.append(v)
             
         values.append(id)
+        
+        # Multi-tenant safety
+        tid = _tenant_id_from_header(request)
         values.append(tid)
+
+        if not set_parts:
+             return {"message": "Nenhum campo válido para atualizar"}
         
-        query = f"UPDATE {DB_SCHEMA}.campanhas SET {', '.join(set_parts)}, atualizado_em = NOW() WHERE id = %s AND (\"IdTenant\" = %s OR \"IdTenant\" IS NULL)"
+        query = f"UPDATE \"{DB_SCHEMA}\".\"Campanhas\" SET {', '.join(set_parts)}, \"Atualizacao\" = NOW() WHERE \"IdCampanha\" = %s AND \"IdTenant\" = %s"
         
-        with get_db_connection() as conn:
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
             cursor.execute(query, tuple(values))
             conn.commit()
             return {"id": id, "message": "Campanha atualizada com sucesso"}
     except Exception as e:
+        print(f"Error updating campanha: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/campanhas/{id}")
 async def campanhas_delete(id: int, request: Request):
     try:
         tid = _tenant_id_from_header(request)
-        with get_db_connection() as conn:
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"DELETE FROM {DB_SCHEMA}.campanhas WHERE id = %s AND (\"IdTenant\" = %s OR \"IdTenant\" IS NULL)", 
+                f"DELETE FROM \"{DB_SCHEMA}\".\"Campanhas\" WHERE \"IdCampanha\" = %s AND \"IdTenant\" = %s", 
                 (id, tid)
             )
             conn.commit()
@@ -482,33 +1029,131 @@ async def campanhas_delete(id: int, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/campanhas/{id}/anexo")
-async def campanhas_upload_anexo(id: int, request: Request, file: UploadFile = File(...)):
+async def campanhas_upload_anexo(id: int, request: Request, file: UploadFile = File(...), type: Optional[str] = Form(None)):
     try:
         tid = _tenant_id_from_header(request)
         content_bytes = await file.read()
         content_str = None
+        filename_lower = file.filename.lower()
         
-        # Se for JSON, salvar conteudo
-        if file.filename.lower().endswith('.json'):
+        # Processamento de arquivos de dados (JSON, CSV, Excel)
+        if filename_lower.endswith(('.json', '.csv', '.xls', '.xlsx')):
             try:
-                # Validar se é JSON válido
-                json_obj = json.loads(content_bytes)
-                content_str = json.dumps(json_obj)
-            except:
+                df = None
+                
+                # JSON
+                if filename_lower.endswith('.json'):
+                    try:
+                        df = pd.read_json(io.BytesIO(content_bytes))
+                    except ValueError:
+                        # Fallback: tentar carregar com json lib e criar DataFrame
+                        json_obj = json.loads(content_bytes)
+                        df = pd.DataFrame(json_obj)
+                
+                # CSV
+                elif filename_lower.endswith('.csv'):
+                    # Detecção rudimentar de encoding
+                    try:
+                        text_content = content_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        text_content = content_bytes.decode('latin-1')
+                    
+                    # Detecção de separador
+                    sep = ','
+                    if ';' in text_content[:1024] and text_content[:1024].count(';') > text_content[:1024].count(','):
+                        sep = ';'
+                        
+                    df = pd.read_csv(io.StringIO(text_content), sep=sep)
+                
+                # Excel
+                elif filename_lower.endswith(('.xls', '.xlsx')):
+                    df = pd.read_excel(io.BytesIO(content_bytes))
+                
+                if df is not None:
+                    # Limpeza básica
+                    df = df.fillna('')
+                    # Converter para JSON string (lista de objetos)
+                    content_str = df.to_json(orient='records', force_ascii=False, date_format='iso')
+                    print(f"Arquivo processado com sucesso. Registros: {len(df)}")
+            except Exception as e:
+                print(f"Erro ao processar arquivo de dados {file.filename}: {str(e)}")
+                # Não interromper, pois pode ser apenas um anexo PDF ou outro
                 pass
         
-        # Salvar no banco se houver conteudo JSON
-        if content_str:
-             with get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    f"UPDATE {DB_SCHEMA}.campanhas SET conteudo_arquivo = %s WHERE id = %s AND (\"IdTenant\" = %s OR \"IdTenant\" IS NULL)",
-                    (content_str, id, tid)
-                )
-                conn.commit()
+        # Se for imagem, salvar em static/campanhas/
+        image_path = None
+        if type == 'imagem' or file.content_type.startswith('image/'):
+             import os
+             import uuid
+             ext = file.filename.split('.')[-1]
+             filename = f"{tid}_{id}_{uuid.uuid4()}.{ext}"
+             static_dir = os.path.join(os.getcwd(), "static", "campanhas")
+             os.makedirs(static_dir, exist_ok=True)
+             with open(os.path.join(static_dir, filename), "wb") as f:
+                 f.write(content_bytes)
+             image_path = f"/static/campanhas/{filename}"
 
-        return {"message": "Arquivo enviado com sucesso", "filename": file.filename}
+        with get_conn_for_request(request) as conn:
+            cursor = conn.cursor()
+            # Se tiver conteúdo JSON processado, salvar
+            if content_str:
+                existing_config: Any = {}
+                existing_other: Any = {}
+                try:
+                    cursor.execute(
+                        f"SELECT \"AnexoJSON\" FROM \"{DB_SCHEMA}\".\"Campanhas\" WHERE \"IdCampanha\" = %s AND \"IdTenant\" = %s",
+                        (id, tid)
+                    )
+                    row = cursor.fetchone()
+                    existing = row[0] if row else None
+                    existing_obj: Any = existing
+                    if isinstance(existing_obj, str):
+                        try:
+                            existing_obj = json.loads(existing_obj)
+                        except Exception:
+                            existing_obj = None
+                    if isinstance(existing_obj, dict):
+                        cfg = existing_obj.get('config')
+                        if isinstance(cfg, dict):
+                            existing_config = cfg
+                        existing_other = {k: v for k, v in existing_obj.items() if k not in ('contacts',)}
+                    else:
+                        existing_other = {}
+                except Exception:
+                    existing_config = {}
+                    existing_other = {}
+
+                try:
+                    records_obj: Any = json.loads(content_str)
+                except Exception:
+                    records_obj = []
+                if not isinstance(records_obj, list):
+                    records_obj = []
+
+                new_anexo: Any = {}
+                if isinstance(existing_other, dict) and existing_other:
+                    new_anexo = {**existing_other}
+                new_anexo['contacts'] = records_obj
+                if not isinstance(new_anexo.get('config'), dict):
+                    new_anexo['config'] = existing_config if isinstance(existing_config, dict) else {}
+
+                cursor.execute(
+                    f"UPDATE \"{DB_SCHEMA}\".\"Campanhas\" SET \"AnexoJSON\" = %s::jsonb WHERE \"IdCampanha\" = %s AND \"IdTenant\" = %s",
+                    (json.dumps(new_anexo, ensure_ascii=False), id, tid)
+                )
+            
+            # Se tiver imagem, salvar path
+            if image_path:
+                 cursor.execute(
+                    f"UPDATE \"{DB_SCHEMA}\".\"Campanhas\" SET \"Imagem\" = %s WHERE \"IdCampanha\" = %s AND \"IdTenant\" = %s",
+                    (image_path, id, tid)
+                )
+                
+            conn.commit()
+            
+        return {"message": "Upload realizado com sucesso", "image_path": image_path}
     except Exception as e:
+        print(f"Error uploading anexo: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 class ProvisionTenantRequest(BaseModel):
@@ -657,42 +1302,72 @@ def apply_migrations():
         try:
             cur.execute(
                 f"""
-                CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.eleitores (
-                    id SERIAL PRIMARY KEY,
-                    nome VARCHAR(255),
-                    cpf VARCHAR(14),
-                    celular VARCHAR(20),
-                    bairro VARCHAR(120),
-                    zona_eleitoral VARCHAR(120),
-                    criado_por INT REFERENCES "{DB_SCHEMA}"."Usuarios"("IdUsuario"),
-                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant"),
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Eleitores" (
+                    "IdEleitor" SERIAL PRIMARY KEY,
+                    "Nome" VARCHAR(255) NOT NULL,
+                    "CPF" VARCHAR(14),
+                    "DataNascimento" DATE,
+                    "Email" VARCHAR(255),
+                    "Telefone" VARCHAR(20),
+                    "Celular" VARCHAR(20),
+                    "CEP" VARCHAR(10),
+                    "Endereco" VARCHAR(255),
+                    "Numero" VARCHAR(10),
+                    "Complemento" VARCHAR(100),
+                    "Bairro" VARCHAR(100),
+                    "Cidade" VARCHAR(100),
+                    "UF" CHAR(2),
+                    "ZonaEleitoral" VARCHAR(10),
+                    "SecaoEleitoral" VARCHAR(10),
+                    "TituloEleitor" VARCHAR(20),
+                    "LocalVotacao" TEXT,
+                    "EnderecoLocalVotacao" TEXT,
+                    "Ativo" BOOLEAN DEFAULT TRUE,
+                    "Observacoes" TEXT,
                     "DataCadastro" TIMESTAMP DEFAULT NOW(),
                     "DataUpdate" TIMESTAMP,
-                    "TipoUpdate" VARCHAR(20),
-                    "UsuarioUpdate" VARCHAR(100)
+                    "Cadastrante" VARCHAR(255),
+                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant"),
+                    "TenantLayer" VARCHAR(50)
                 )
                 """
             )
-            actions.append('eleitores created')
+            actions.append('Eleitores created')
         except Exception:
             pass
         try:
             cur.execute(
                 f"""
-                CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.ativistas (
-                    id SERIAL PRIMARY KEY,
-                    nome VARCHAR(255),
-                    tipo_apoio VARCHAR(120),
-                    criado_por INT REFERENCES "{DB_SCHEMA}"."Usuarios"("IdUsuario"),
-                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant"),
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Ativistas" (
+                    "IdAtivista" SERIAL PRIMARY KEY,
+                    "Nome" VARCHAR(255) NOT NULL,
+                    "CPF" VARCHAR(14),
+                    "DataNascimento" DATE,
+                    "Email" VARCHAR(255),
+                    "Telefone" VARCHAR(20),
+                    "Celular" VARCHAR(20),
+                    "CEP" VARCHAR(10),
+                    "Endereco" VARCHAR(255),
+                    "Numero" VARCHAR(10),
+                    "Complemento" VARCHAR(100),
+                    "Bairro" VARCHAR(100),
+                    "Cidade" VARCHAR(100),
+                    "UF" CHAR(2),
+                    "TipoApoio" VARCHAR(50),
+                    "AreaAtuacao" VARCHAR(100),
+                    "Habilidades" TEXT,
+                    "Disponibilidade" TEXT,
+                    "Ativo" BOOLEAN DEFAULT TRUE,
+                    "Observacoes" TEXT,
                     "DataCadastro" TIMESTAMP DEFAULT NOW(),
                     "DataUpdate" TIMESTAMP,
-                    "TipoUpdate" VARCHAR(20),
-                    "UsuarioUpdate" VARCHAR(100)
+                    "Cadastrante" VARCHAR(255),
+                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant"),
+                    "TenantLayer" VARCHAR(50)
                 )
                 """
             )
-            actions.append('ativistas created')
+            actions.append('Ativistas created')
         except Exception:
             pass
         # legacy schema.sql execution removed to avoid recreating lowercase 'usuarios'
@@ -777,7 +1452,7 @@ def apply_migrations():
         try:
             cur.execute(
                 f"""
-                CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.eleitores (
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Eleitores" (
                     id SERIAL PRIMARY KEY,
                     nome VARCHAR(255),
                     cpf VARCHAR(14),
@@ -793,13 +1468,13 @@ def apply_migrations():
                 )
                 """
             )
-            actions.append('eleitores created')
+            actions.append('Eleitores created')
         except Exception:
             pass
         try:
             cur.execute(
                 f"""
-                CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.ativistas (
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Ativistas" (
                     id SERIAL PRIMARY KEY,
                     nome VARCHAR(255),
                     tipo_apoio VARCHAR(120),
@@ -812,7 +1487,7 @@ def apply_migrations():
                 )
                 """
             )
-            actions.append('ativistas created')
+            actions.append('Ativistas created')
         except Exception:
             pass
         try:
@@ -1156,51 +1831,79 @@ def apply_migrations():
         # CAMPANHAS MIGRATION
         # -----------------------------------------------------------
         try:
+            # Create table with new schema
             cur.execute(
                 f"""
-                CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.campanhas (
-                    id SERIAL PRIMARY KEY,
-                    nome VARCHAR(255) NOT NULL,
-                    descricao TEXT,
-                    data_inicio DATE NOT NULL,
-                    data_fim DATE,
-                    status VARCHAR(50) DEFAULT 'PLANEJAMENTO',
-                    meta INTEGER DEFAULT 0,
-                    enviados INTEGER DEFAULT 0,
-                    nao_enviados INTEGER DEFAULT 0,
-                    positivos INTEGER DEFAULT 0,
-                    negativos INTEGER DEFAULT 0,
-                    aguardando INTEGER DEFAULT 0,
-                    criado_por INTEGER REFERENCES "{DB_SCHEMA}"."Usuarios"("IdUsuario"),
-                    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    "IdTenant" INTEGER REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Campanhas" (
+                    "IdCampanha" SERIAL PRIMARY KEY,
+                    "NomeCampanha" VARCHAR(500),
+                    "Texto" TEXT,
+                    "DataInicio" DATE,
+                    "DataFim" DATE,
+                    "Status" BOOLEAN DEFAULT TRUE,
+                    "Meta" INTEGER DEFAULT 0,
+                    "Enviados" INTEGER DEFAULT 0,
+                    "NaoEnviados" INTEGER DEFAULT 0,
+                    "Positivos" INTEGER DEFAULT 0,
+                    "Negativos" INTEGER DEFAULT 0,
+                    "Aguardando" INTEGER DEFAULT 0,
+                    "Cadastrante" VARCHAR(500),
+                    "DataCriacao" TIMESTAMP DEFAULT NOW(),
+                    "Atualizacao" TIMESTAMP,
+                    "AnexoJSON" JSONB,
+                    "Imagem" TEXT,
+                    "IdTenant" INT REFERENCES "{DB_SCHEMA}"."Tenant"("IdTenant")
                 )
                 """
             )
-            actions.append('campanhas created')
+            actions.append('Campanhas created')
             
-            # Ensure new columns exist if table already existed
-            campanha_cols = [
-                "meta", "enviados", "nao_enviados", "positivos", "negativos", "aguardando"
-            ]
-            for col in campanha_cols:
-                cur.execute(
-                    f"ALTER TABLE {DB_SCHEMA}.campanhas ADD COLUMN IF NOT EXISTS {col} INTEGER DEFAULT 0"
-                )
-            
-            # Add conteudo_arquivo column
-            cur.execute(
-                f"ALTER TABLE {DB_SCHEMA}.campanhas ADD COLUMN IF NOT EXISTS conteudo_arquivo TEXT"
-            )
-            
-            # Remove orcamento if exists (optional, keeping it clean)
-            # cur.execute(f"ALTER TABLE {DB_SCHEMA}.campanhas DROP COLUMN IF EXISTS orcamento")
-            
-            actions.append('campanhas columns ensured')
+            # ALTER COLUMNS TO MATCH NEW SCHEMA
+            try:
+                # Resize VARCHAR(255) to VARCHAR(500)
+                cur.execute(f'ALTER TABLE "{DB_SCHEMA}"."Campanhas" ALTER COLUMN "NomeCampanha" TYPE VARCHAR(500)')
+                cur.execute(f'ALTER TABLE "{DB_SCHEMA}"."Campanhas" ALTER COLUMN "Cadastrante" TYPE VARCHAR(500)')
+                
+                # Change Status to BOOLEAN (casting 'PLANEJAMENTO'/'ATIVO' etc to boolean if needed, or default true)
+                # CASE: If 'INATIVO' or 'FALSE' or '0' -> False, else True
+                cur.execute(f"""
+                    ALTER TABLE "{DB_SCHEMA}"."Campanhas" 
+                    ALTER COLUMN "Status" TYPE BOOLEAN 
+                    USING (CASE 
+                        WHEN "Status"::text ILIKE 'INATIVO' OR "Status"::text ILIKE 'FALSE' OR "Status"::text = '0' THEN FALSE 
+                        ELSE TRUE 
+                    END)
+                """)
+                
+                # Change AnexoJSON to JSONB
+                cur.execute(f'ALTER TABLE "{DB_SCHEMA}"."Campanhas" ALTER COLUMN "AnexoJSON" TYPE JSONB USING "AnexoJSON"::jsonb')
+                
+                # Ensure columns exist (if table existed but missed some columns)
+                campanha_cols = [
+                    ('"Meta"', 'INTEGER DEFAULT 0'),
+                    ('"Enviados"', 'INTEGER DEFAULT 0'),
+                    ('"NaoEnviados"', 'INTEGER DEFAULT 0'),
+                    ('"Positivos"', 'INTEGER DEFAULT 0'),
+                    ('"Negativos"', 'INTEGER DEFAULT 0'),
+                    ('"Aguardando"', 'INTEGER DEFAULT 0'),
+                    ('"Cadastrante"', 'VARCHAR(500)'),
+                    ('"AnexoJSON"', 'JSONB'),
+                    ('"Imagem"', 'TEXT')
+                ]
+                for col_name, col_type in campanha_cols:
+                    try:
+                        cur.execute(
+                            f"ALTER TABLE \"{DB_SCHEMA}\".\"Campanhas\" ADD COLUMN IF NOT EXISTS {col_name} {col_type}"
+                        )
+                    except Exception:
+                        pass
+                        
+                actions.append('Campanhas schema updated')
+            except Exception as e:
+                actions.append(f'Campanhas alter error: {str(e)}')
 
         except Exception as e:
-            actions.append(f'campanhas error: {str(e)}')
+            actions.append(f'Campanhas error: {str(e)}')
             pass
             
     return actions
@@ -1367,7 +2070,7 @@ def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):
         try:
             cur.execute(
                 f"""
-                CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.eleitores (
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Eleitores" (
                     id SERIAL PRIMARY KEY,
                     nome VARCHAR(255),
                     cpf VARCHAR(14),
@@ -1383,13 +2086,13 @@ def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):
                 )
                 """
             )
-            actions.append('eleitores ensured (tenant DB)')
+            actions.append('Eleitores ensured (tenant DB)')
         except Exception:
             pass
         try:
             cur.execute(
                 f"""
-                CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.ativistas (
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Ativistas" (
                     id SERIAL PRIMARY KEY,
                     nome VARCHAR(255),
                     tipo_apoio VARCHAR(120),
@@ -1402,7 +2105,7 @@ def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):
                 )
                 """
             )
-            actions.append('ativistas ensured (tenant DB)')
+            actions.append('Ativistas ensured (tenant DB)')
         except Exception:
             pass
         try:
@@ -1628,7 +2331,7 @@ async def admin_ensure_eleitores_ativistas():
             try:
                 cur.execute(
                     f"""
-                    CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.eleitores (
+                    CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Eleitores" (
                         id SERIAL PRIMARY KEY,
                         nome VARCHAR(255),
                         cpf VARCHAR(14),
@@ -1649,7 +2352,7 @@ async def admin_ensure_eleitores_ativistas():
             try:
                 cur.execute(
                     f"""
-                    CREATE TABLE IF NOT EXISTS {DB_SCHEMA}.ativistas (
+                    CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Ativistas" (
                         id SERIAL PRIMARY KEY,
                         nome VARCHAR(255),
                         tipo_apoio VARCHAR(120),
@@ -1998,11 +2701,12 @@ async def usuarios_list(limit: int = 200, request: Request = None):
         view = request.headers.get('X-View-Tenant') if request else None
         s = str(slug or '').lower()
         if s != 'captar':
+            tid = _tenant_id_from_header(request)
             with get_conn_for_request(request) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    f"SELECT u.* FROM \"{DB_SCHEMA}\".\"Usuarios\" u ORDER BY 1 ASC LIMIT %s",
-                    (limit,)
+                    f"SELECT u.* FROM \"{DB_SCHEMA}\".\"Usuarios\" u WHERE \"IdTenant\" = %s ORDER BY 1 ASC LIMIT %s",
+                    (tid, limit)
                 )
                 colnames = [desc[0] for desc in cursor.description]
                 rows = cursor.fetchall()
@@ -2020,7 +2724,8 @@ async def usuarios_list(limit: int = 200, request: Request = None):
             if view_s == 'captar':
                 with get_db_connection() as conn_c:
                     cur_c = conn_c.cursor()
-                    cur_c.execute(f"SELECT u.* FROM \"{DB_SCHEMA}\".\"Usuarios\" u ORDER BY 1 ASC LIMIT %s", (limit,))
+                    tid_c = _ensure_tenant_slug('captar')
+                    cur_c.execute(f"SELECT u.* FROM \"{DB_SCHEMA}\".\"Usuarios\" u WHERE \"IdTenant\" = %s ORDER BY 1 ASC LIMIT %s", (tid_c, limit))
                     cols_c = [d[0] for d in cur_c.description]
                     rows_c = cur_c.fetchall()
                     data = [dict(zip(cols_c, r)) for r in rows_c]
@@ -2032,9 +2737,10 @@ async def usuarios_list(limit: int = 200, request: Request = None):
             dsn = _get_dsn_by_slug(view_s)
             if dsn:
                 try:
+                    tid_t = _ensure_tenant_slug(view_s)
                     with get_db_connection(dsn) as conn_t:
                         cur_t = conn_t.cursor()
-                        cur_t.execute(f"SELECT u.* FROM \"{DB_SCHEMA}\".\"Usuarios\" u ORDER BY 1 ASC LIMIT %s", (limit,))
+                        cur_t.execute(f"SELECT u.* FROM \"{DB_SCHEMA}\".\"Usuarios\" u WHERE \"IdTenant\" = %s ORDER BY 1 ASC LIMIT %s", (tid_t, limit))
                         cols_t = [d[0] for d in cur_t.description]
                         rows_t = cur_t.fetchall()
                         data = [dict(zip(cols_t, r)) for r in rows_t]
@@ -2063,9 +2769,10 @@ async def usuarios_list(limit: int = 200, request: Request = None):
             cur_c = conn_c.cursor()
             try:
                 if not view_s or view_s == 'captar':
+                    tid_c = _ensure_tenant_slug('captar')
                     cur_c.execute(
-                        f"SELECT u.* FROM \"{DB_SCHEMA}\".\"Usuarios\" u ORDER BY 1 ASC LIMIT %s",
-                        (limit,)
+                        f"SELECT u.* FROM \"{DB_SCHEMA}\".\"Usuarios\" u WHERE \"IdTenant\" = %s ORDER BY 1 ASC LIMIT %s",
+                        (tid_c, limit)
                     )
                     cols_c = [d[0] for d in cur_c.description]
                     union_cols.update(cols_c)
@@ -2077,9 +2784,9 @@ async def usuarios_list(limit: int = 200, request: Request = None):
             except Exception:
                 pass
             # tenants via DSN
-            cur_c.execute(f'SELECT t."Slug", t."Nome", t."Dsn" FROM "{DB_SCHEMA}"."Tenant" t WHERE t."Dsn" IS NOT NULL')
+            cur_c.execute(f'SELECT t."Slug", t."Nome", t."Dsn", t."IdTenant" FROM "{DB_SCHEMA}"."Tenant" t WHERE t."Dsn" IS NOT NULL')
             tenants = cur_c.fetchall()
-        for slug_row, nome_row, dsn_row in tenants:
+        for slug_row, nome_row, dsn_row, id_tenant_row in tenants:
             try:
                 dsn = str(dsn_row or '')
                 if not dsn:
@@ -2089,8 +2796,8 @@ async def usuarios_list(limit: int = 200, request: Request = None):
                 with get_db_connection(dsn) as conn_t:
                     cur_t = conn_t.cursor()
                     cur_t.execute(
-                        f"SELECT u.* FROM \"{DB_SCHEMA}\".\"Usuarios\" u ORDER BY 1 ASC LIMIT %s",
-                        (limit,)
+                        f"SELECT u.* FROM \"{DB_SCHEMA}\".\"Usuarios\" u WHERE \"IdTenant\" = %s ORDER BY 1 ASC LIMIT %s",
+                        (id_tenant_row, limit)
                     )
                     cols_t = [d[0] for d in cur_t.description]
                     union_cols.update(cols_t)
@@ -2209,7 +2916,8 @@ async def usuarios_update(id: int, payload: dict, request: Request):
         data = {k: v for k, v in payload.items() if k in allowed}
         with get_conn_for_request(request) as conn_check:
             cur0 = conn_check.cursor()
-            cur0.execute(f'SELECT "Usuario" FROM "{DB_SCHEMA}"."Usuarios" WHERE "IdUsuario" = %s LIMIT 1', (id,))
+            tid = _tenant_id_from_header(request)
+            cur0.execute(f'SELECT "Usuario" FROM "{DB_SCHEMA}"."Usuarios" WHERE "IdUsuario" = %s AND "IdTenant" = %s LIMIT 1', (id, tid))
             row0 = cur0.fetchone()
             if row0:
                 u0 = str(row0[0] or '').strip().upper()
@@ -2318,15 +3026,16 @@ async def usuarios_update(id: int, payload: dict, request: Request):
 @app.delete("/api/usuarios/{id}")
 async def usuarios_delete(id: int, request: Request):
     try:
+        tid = _tenant_id_from_header(request)
         with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
-            cursor.execute(f'SELECT "Usuario" FROM "{DB_SCHEMA}"."Usuarios" WHERE "IdUsuario" = %s LIMIT 1', (id,))
+            cursor.execute(f'SELECT "Usuario" FROM "{DB_SCHEMA}"."Usuarios" WHERE "IdUsuario" = %s AND "IdTenant" = %s LIMIT 1', (id, tid))
             r0 = cursor.fetchone()
             if r0:
                 u0 = str(r0[0] or '').strip().upper()
                 if u0 == 'ADMIN' or u0.startswith('ADMIN.'):
                     raise HTTPException(status_code=403, detail='Usuário padrão do sistema não pode ser removido')
-            cursor.execute(f"DELETE FROM \"{DB_SCHEMA}\".\"Usuarios\" WHERE \"IdUsuario\" = %s", (id,))
+            cursor.execute(f"DELETE FROM \"{DB_SCHEMA}\".\"Usuarios\" WHERE \"IdUsuario\" = %s AND \"IdTenant\" = %s", (id, tid))
             conn.commit()
             try:
                 slug = _tenant_slug(request)
@@ -2370,9 +3079,13 @@ async def get_permissao(perfil: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/permissoes/{perfil}")
-async def update_permissao(perfil: str, data: PermissaoUpdate):
+async def update_permissao(perfil: str, data: PermissaoUpdate, request: Request):
     """Atualizar permissões de um perfil"""
     try:
+        slug = _tenant_slug(request)
+        if slug.lower() != 'captar':
+            raise HTTPException(status_code=403, detail="Apenas o tenant principal pode gerenciar permissões globais")
+        
         with get_db_connection() as conn:
             cursor = conn.cursor()
             updates = []
@@ -2391,12 +3104,18 @@ async def update_permissao(perfil: str, data: PermissaoUpdate):
             cursor.execute(query, tuple(values))
             conn.commit()
             return {"message": "Permissões atualizadas com sucesso"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/permissoes")
-async def create_permissao(data: PermissaoUpdate):
+async def create_permissao(data: PermissaoUpdate, request: Request):
     try:
+        slug = _tenant_slug(request)
+        if slug.lower() != 'captar':
+            raise HTTPException(status_code=403, detail="Apenas o tenant principal pode gerenciar permissões globais")
+
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2423,23 +3142,35 @@ async def create_permissao(data: PermissaoUpdate):
             new_id = cursor.fetchone()[0]
             conn.commit()
             return {"id": new_id, "message": "Perfil criado com sucesso"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/permissoes/{perfil}")
-async def delete_permissao(perfil: str):
+async def delete_permissao(perfil: str, request: Request):
     try:
+        slug = _tenant_slug(request)
+        if slug.lower() != 'captar':
+            raise HTTPException(status_code=403, detail="Apenas o tenant principal pode gerenciar permissões globais")
+
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(f"DELETE FROM {DB_SCHEMA}.permissoes WHERE perfil = %s", (perfil,))
             conn.commit()
             return {"message": "Perfil deletado com sucesso"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== PERFIL (TABELA perfil) ====================
 
 def get_table_columns(table: str):
+    # Map lowercase table names to capitalized ones for specific tables
+    if table.lower() in ['eleitores', 'ativistas', 'campanhas']:
+        table = table.capitalize()
+        
     rc = get_redis_client()
     if rc:
         try:
@@ -2488,11 +3219,14 @@ def _get_dsn_by_slug(slug: str):
 def _aggregate_table_all_tenants(table: str, limit: int = 500):
     union_cols = set()
     out_rows = []
+    # Ensure table name is capitalized for the new schema
+    table_name = table.capitalize()
     try:
         with get_db_connection() as conn_c:
             cur_c = conn_c.cursor()
             try:
-                cur_c.execute(f"SELECT * FROM {DB_SCHEMA}.{table} ORDER BY 1 ASC LIMIT %s", (limit,))
+                tid_c = _ensure_tenant_slug('captar')
+                cur_c.execute(f"SELECT * FROM \"{DB_SCHEMA}\".\"{table_name}\" WHERE \"IdTenant\" = %s ORDER BY 1 ASC LIMIT %s", (tid_c, limit))
                 cols_c = [d[0] for d in cur_c.description]
                 union_cols.update(cols_c)
                 rows_c = cur_c.fetchall()
@@ -2503,14 +3237,14 @@ def _aggregate_table_all_tenants(table: str, limit: int = 500):
             except Exception:
                 pass
             tenants = _list_tenants_with_dsn()
-        for slug_row, nome_row, dsn_row in tenants:
+        for slug_row, nome_row, dsn_row, idt_row in tenants:
             try:
                 dsn = str(dsn_row or '')
                 if not dsn:
                     continue
                 with get_db_connection(dsn) as conn_t:
                     cur_t = conn_t.cursor()
-                    cur_t.execute(f"SELECT * FROM {DB_SCHEMA}.{table} ORDER BY 1 ASC LIMIT %s", (limit,))
+                    cur_t.execute(f"SELECT * FROM \"{DB_SCHEMA}\".\"{table_name}\" WHERE \"IdTenant\" = %s ORDER BY 1 ASC LIMIT %s", (idt_row, limit))
                     cols_t = [d[0] for d in cur_t.description]
                     union_cols.update(cols_t)
                     rows_t = cur_t.fetchall()
@@ -2568,10 +3302,11 @@ async def perfil_list(limit: int = 200, request: Request = None):
                     return {"rows": data["rows"], "columns": data["columns"]}
             except Exception:
                 pass
-        with get_db_connection() as conn:
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
             if str(slug or '').lower() == 'captar':
-                cursor.execute(f"SELECT * FROM \"{DB_SCHEMA}\".\"Perfil\" ORDER BY 1 DESC LIMIT %s", (limit,))
+                tid = _ensure_tenant_slug('captar')
+                cursor.execute(f"SELECT * FROM \"{DB_SCHEMA}\".\"Perfil\" WHERE \"IdTenant\" = %s ORDER BY 1 DESC LIMIT %s", (tid, limit))
             else:
                 cursor.execute(f"SELECT * FROM \"{DB_SCHEMA}\".\"Perfil\" WHERE \"IdTenant\" = %s ORDER BY 1 DESC LIMIT %s", (_tenant_id_from_header(request), limit))
             colnames = [desc[0] for desc in cursor.description]
@@ -2601,7 +3336,7 @@ async def perfil_create(payload: dict, request: Request):
         values = [data[k] for k in keys]
         placeholders = ", ".join(["%s"] * len(values))
         columns_sql = ", ".join([f'"{k}"' for k in keys])
-        with get_db_connection() as conn:
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 f"INSERT INTO \"{DB_SCHEMA}\".\"Perfil\" ({columns_sql}) VALUES ({placeholders}) RETURNING \"IdPerfil\"",
@@ -2634,7 +3369,8 @@ async def perfil_update(id: int, payload: dict, request: Request):
             raise HTTPException(status_code=400, detail="Nenhum campo válido para atualizar")
         set_parts = ", ".join([f'"{k}"=%s' for k in keys])
         values = [data[k] for k in keys]
-        with get_db_connection() as conn:
+        
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 f"UPDATE \"{DB_SCHEMA}\".\"Perfil\" SET {set_parts} WHERE \"IdPerfil\" = %s AND \"IdTenant\" = %s",
@@ -2654,11 +3390,12 @@ async def perfil_update(id: int, payload: dict, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/perfil/{id}")
-async def perfil_delete(id: int):
+async def perfil_delete(id: int, request: Request):
     try:
-        with get_db_connection() as conn:
+        tid = _tenant_id_from_header(request)
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
-            cursor.execute(f"DELETE FROM \"{DB_SCHEMA}\".\"Perfil\" WHERE \"IdPerfil\" = %s", (id,))
+            cursor.execute(f"DELETE FROM \"{DB_SCHEMA}\".\"Perfil\" WHERE \"IdPerfil\" = %s AND \"IdTenant\" = %s", (id, tid))
             conn.commit()
             # limpar cache para todos tenants (CAPTAR administrativo)
             rc = get_redis_client()
@@ -2694,10 +3431,11 @@ async def funcoes_list(limit: int = 200, request: Request = None):
                     return {"rows": data["rows"], "columns": data["columns"]}
             except Exception:
                 pass
-        with get_db_connection() as conn:
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
             if str(slug or '').lower() == 'captar':
-                cursor.execute(f"SELECT * FROM \"{DB_SCHEMA}\".\"Funcoes\" ORDER BY \"IdFuncao\" DESC LIMIT %s", (limit,))
+                tid = _ensure_tenant_slug('captar')
+                cursor.execute(f"SELECT * FROM \"{DB_SCHEMA}\".\"Funcoes\" WHERE \"IdTenant\" = %s ORDER BY \"IdFuncao\" DESC LIMIT %s", (tid, limit))
             else:
                 cursor.execute(f"SELECT * FROM \"{DB_SCHEMA}\".\"Funcoes\" WHERE \"IdTenant\" = %s ORDER BY \"IdFuncao\" DESC LIMIT %s", (_tenant_id_from_header(request), limit))
             colnames = [desc[0] for desc in cursor.description]
@@ -2727,7 +3465,7 @@ async def funcoes_create(payload: dict, request: Request):
         values = [data[k] for k in keys]
         placeholders = ", ".join(["%s"] * len(values))
         columns_sql = ", ".join([f'"{k}"' for k in keys])
-        with get_db_connection() as conn:
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 f"INSERT INTO \"{DB_SCHEMA}\".\"Funcoes\" ({columns_sql}) VALUES ({placeholders}) RETURNING \"IdFuncao\"",
@@ -2760,7 +3498,7 @@ async def funcoes_update(id: int, payload: dict, request: Request):
             raise HTTPException(status_code=400, detail="Nenhum campo válido para atualizar")
         set_parts = ", ".join([f'"{k}"=%s' for k in keys])
         values = [data[k] for k in keys]
-        with get_db_connection() as conn:
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 f"UPDATE \"{DB_SCHEMA}\".\"Funcoes\" SET {set_parts} WHERE \"IdFuncao\" = %s AND \"IdTenant\" = %s",
@@ -2780,11 +3518,12 @@ async def funcoes_update(id: int, payload: dict, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/funcoes/{id}")
-async def funcoes_delete(id: int):
+async def funcoes_delete(id: int, request: Request):
     try:
-        with get_db_connection() as conn:
+        tid = _tenant_id_from_header(request)
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
-            cursor.execute(f"DELETE FROM \"{DB_SCHEMA}\".\"Funcoes\" WHERE \"IdFuncao\" = %s", (id,))
+            cursor.execute(f"DELETE FROM \"{DB_SCHEMA}\".\"Funcoes\" WHERE \"IdFuncao\" = %s AND \"IdTenant\" = %s", (id, tid))
             conn.commit()
             rc = get_redis_client()
             if rc:
@@ -2802,27 +3541,27 @@ async def funcoes_delete(id: int):
 async def aplicar_filtro(filtro: FiltroRequest, request: Request = None):
     """Aplicar filtros avançados"""
     try:
-        with get_db_connection() as conn:
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
             tid = _tenant_id_from_header(request)
 
             if filtro.tipo == "coordenador":
-                query = f"SELECT * FROM {DB_SCHEMA}.eleitores e WHERE e.coordenador = %s AND EXISTS (SELECT 1 FROM \"{DB_SCHEMA}\".\"Usuarios\" u WHERE u.\"Nome\" = e.coordenador AND u.\"IdTenant\" = %s)"
+                query = f"SELECT * FROM \"{DB_SCHEMA}\".\"Eleitores\" e WHERE e.coordenador = %s AND EXISTS (SELECT 1 FROM \"{DB_SCHEMA}\".\"Usuarios\" u WHERE u.\"Nome\" = e.coordenador AND u.\"IdTenant\" = %s)"
             elif filtro.tipo == "supervisor":
-                query = f"SELECT * FROM {DB_SCHEMA}.eleitores e WHERE e.supervisor = %s AND EXISTS (SELECT 1 FROM \"{DB_SCHEMA}\".\"Usuarios\" u WHERE u.\"Nome\" = e.supervisor AND u.\"IdTenant\" = %s)"
+                query = f"SELECT * FROM \"{DB_SCHEMA}\".\"Eleitores\" e WHERE e.supervisor = %s AND EXISTS (SELECT 1 FROM \"{DB_SCHEMA}\".\"Usuarios\" u WHERE u.\"Nome\" = e.supervisor AND u.\"IdTenant\" = %s)"
             elif filtro.tipo == "ativista":
-                query = f"SELECT * FROM {DB_SCHEMA}.eleitores e WHERE e.indicacao = %s AND EXISTS (SELECT 1 FROM \"{DB_SCHEMA}\".\"Usuarios\" u WHERE u.\"Nome\" = e.indicacao AND u.\"IdTenant\" = %s)"
+                query = f"SELECT * FROM \"{DB_SCHEMA}\".\"Eleitores\" e WHERE e.indicacao = %s AND EXISTS (SELECT 1 FROM \"{DB_SCHEMA}\".\"Usuarios\" u WHERE u.\"Nome\" = e.indicacao AND u.\"IdTenant\" = %s)"
             elif filtro.tipo == "bairro":
-                query = f"SELECT * FROM {DB_SCHEMA}.eleitores WHERE bairro = %s"
+                query = f"SELECT * FROM \"{DB_SCHEMA}\".\"Eleitores\" WHERE bairro = %s AND \"IdTenant\" = %s"
             elif filtro.tipo == "zona":
-                query = f"SELECT * FROM {DB_SCHEMA}.eleitores WHERE zona_eleitoral = %s"
+                query = f"SELECT * FROM \"{DB_SCHEMA}\".\"Eleitores\" WHERE zona_eleitoral = %s AND \"IdTenant\" = %s"
             else:
                 raise HTTPException(status_code=400, detail="Tipo de filtro inválido")
             
             if filtro.tipo in ("coordenador","supervisor","ativista"):
                 cursor.execute(query, (filtro.valor, tid))
             else:
-                cursor.execute(query, (filtro.valor,))
+                cursor.execute(query, (filtro.valor, tid))
             results = cursor.fetchall()
             columns = [desc[0] for desc in cursor.description]
             return [dict(zip(columns, row)) for row in results]
@@ -2839,9 +3578,9 @@ async def export_excel(data: ExportRequest):
             cursor = conn.cursor()
             
             if data.tabela == "eleitores":
-                cursor.execute(f"SELECT * FROM {DB_SCHEMA}.eleitores LIMIT 1000")
+                cursor.execute(f"SELECT * FROM \"{DB_SCHEMA}\".\"Eleitores\" LIMIT 1000")
             elif data.tabela == "ativistas":
-                cursor.execute(f"SELECT * FROM {DB_SCHEMA}.ativistas LIMIT 1000")
+                cursor.execute(f"SELECT * FROM \"{DB_SCHEMA}\".\"Ativistas\" LIMIT 1000")
             elif data.tabela == "Usuarios":
                 cursor.execute(f"SELECT * FROM \"{DB_SCHEMA}\".\"Usuarios\" LIMIT 1000")
             else:
@@ -2929,7 +3668,7 @@ async def import_csv(file: UploadFile = File(...)):
             for _, row in df.iterrows():
                 try:
                     cursor.execute(
-                        f"INSERT INTO {DB_SCHEMA}.eleitores (nome, cpf, celular) VALUES (%s, %s, %s)",
+                        f"INSERT INTO \"{DB_SCHEMA}\".\"Eleitores\" (nome, cpf, celular) VALUES (%s, %s, %s)",
                         (row['nome'], row['cpf'], row['celular'])
                     )
                     inserted += 1
@@ -2976,14 +3715,21 @@ async def create_notificacao(notif_data: NotificacaoCreate):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/notificacoes/{notif_id}/marcar-lida")
-async def marcar_notificacao_lida(notif_id: int):
+async def marcar_notificacao_lida(notif_id: int, request: Request):
     """Marcar notificação como lida"""
     try:
-        with get_db_connection() as conn:
+        tid = _tenant_id_from_header(request)
+        with get_conn_for_request(request) as conn:
             cursor = conn.cursor()
+            # Ensure we only update notifications belonging to users of the current tenant
             cursor.execute(
-                f"UPDATE {DB_SCHEMA}.notificacoes SET lida = true, lida_em = %s WHERE id = %s",
-                (datetime.utcnow(), notif_id)
+                f"""
+                UPDATE {DB_SCHEMA}.notificacoes n
+                SET lida = true, lida_em = %s
+                FROM {DB_SCHEMA}.usuarios u
+                WHERE n.usuario_id = u.id AND n.id = %s AND u."IdTenant" = %s
+                """,
+                (datetime.utcnow(), notif_id, tid)
             )
             conn.commit()
             return {"message": "Notificação marcada como lida"}
@@ -3019,7 +3765,7 @@ async def dashboard_stats(request: Request = None):
             if s != 'captar':
                 try:
                     cursor.execute(
-                        f"SELECT COUNT(*) FROM {DB_SCHEMA}.eleitores e JOIN \"{DB_SCHEMA}\".\"Usuarios\" u ON e.criado_por = u.\"IdUsuario\" WHERE u.\"IdTenant\" = %s",
+                        f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Eleitores\" e JOIN \"{DB_SCHEMA}\".\"Usuarios\" u ON e.criado_por = u.\"IdUsuario\" WHERE u.\"IdTenant\" = %s",
                         (tid,)
                     )
                     total_eleitores = cursor.fetchone()[0]
@@ -3027,7 +3773,7 @@ async def dashboard_stats(request: Request = None):
                     total_eleitores = 0
                 try:
                     cursor.execute(
-                        f"SELECT COUNT(*) FROM {DB_SCHEMA}.ativistas a JOIN \"{DB_SCHEMA}\".\"Usuarios\" u ON a.criado_por = u.\"IdUsuario\" WHERE u.\"IdTenant\" = %s",
+                        f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Ativistas\" a JOIN \"{DB_SCHEMA}\".\"Usuarios\" u ON a.criado_por = u.\"IdUsuario\" WHERE u.\"IdTenant\" = %s",
                         (tid,)
                     )
                     total_ativistas = cursor.fetchone()[0]
@@ -3040,13 +3786,13 @@ async def dashboard_stats(request: Request = None):
                 )
                 total_usuarios = cursor.fetchone()[0]
                 cursor.execute(
-                    f"SELECT COALESCE(e.zona_eleitoral, 'N/D') AS zona, COUNT(*) AS qtd FROM {DB_SCHEMA}.eleitores e JOIN \"{DB_SCHEMA}\".\"Usuarios\" u ON e.criado_por = u.\"IdUsuario\" WHERE u.\"IdTenant\" = %s GROUP BY e.zona_eleitoral ORDER BY qtd DESC LIMIT 20",
+                    f"SELECT COALESCE(e.zona_eleitoral, 'N/D') AS zona, COUNT(*) AS qtd FROM \"{DB_SCHEMA}\".\"Eleitores\" e JOIN \"{DB_SCHEMA}\".\"Usuarios\" u ON e.criado_por = u.\"IdUsuario\" WHERE u.\"IdTenant\" = %s GROUP BY e.zona_eleitoral ORDER BY qtd DESC LIMIT 20",
                     (tid,)
                 )
                 zonas_rows = cursor.fetchall()
                 try:
                     cursor.execute(
-                        f"SELECT COALESCE(a.tipo_apoio, 'N/D') AS funcao, COUNT(*) AS qtd FROM {DB_SCHEMA}.ativistas a JOIN \"{DB_SCHEMA}\".\"Usuarios\" u ON a.criado_por = u.\"IdUsuario\" WHERE u.\"IdTenant\" = %s GROUP BY a.tipo_apoio ORDER BY qtd DESC LIMIT 20",
+                        f"SELECT COALESCE(a.tipo_apoio, 'N/D') AS funcao, COUNT(*) AS qtd FROM \"{DB_SCHEMA}\".\"Ativistas\" a JOIN \"{DB_SCHEMA}\".\"Usuarios\" u ON a.criado_por = u.\"IdUsuario\" WHERE u.\"IdTenant\" = %s GROUP BY a.tipo_apoio ORDER BY qtd DESC LIMIT 20",
                         (tid,)
                     )
                     ativistas_por_funcao_rows = cursor.fetchall()
@@ -3054,12 +3800,12 @@ async def dashboard_stats(request: Request = None):
                     ativistas_por_funcao_rows = []
             else:
                 try:
-                    cursor.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.eleitores")
+                    cursor.execute(f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Eleitores\"")
                     total_eleitores = cursor.fetchone()[0]
                 except Exception:
                     total_eleitores = 0
                 try:
-                    cursor.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.ativistas")
+                    cursor.execute(f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Ativistas\"")
                     total_ativistas = cursor.fetchone()[0]
                 except Exception:
                     total_ativistas = 0
@@ -3067,14 +3813,14 @@ async def dashboard_stats(request: Request = None):
                 total_usuarios = cursor.fetchone()[0]
                 try:
                     cursor.execute(
-                        f"SELECT COALESCE(zona_eleitoral, 'N/D') AS zona, COUNT(*) AS qtd FROM {DB_SCHEMA}.eleitores GROUP BY zona_eleitoral ORDER BY qtd DESC LIMIT 20"
+                        f"SELECT COALESCE(zona_eleitoral, 'N/D') AS zona, COUNT(*) AS qtd FROM \"{DB_SCHEMA}\".\"Eleitores\" GROUP BY zona_eleitoral ORDER BY qtd DESC LIMIT 20"
                     )
                     zonas_rows = cursor.fetchall()
                 except Exception:
                     zonas_rows = []
                 try:
                     cursor.execute(
-                        f"SELECT COALESCE(tipo_apoio, 'N/D') AS funcao, COUNT(*) AS qtd FROM {DB_SCHEMA}.ativistas GROUP BY tipo_apoio ORDER BY qtd DESC LIMIT 20"
+                        f"SELECT COALESCE(tipo_apoio, 'N/D') AS funcao, COUNT(*) AS qtd FROM \"{DB_SCHEMA}\".\"Ativistas\" GROUP BY tipo_apoio ORDER BY qtd DESC LIMIT 20"
                     )
                     ativistas_por_funcao_rows = cursor.fetchall()
                 except Exception:
@@ -3096,12 +3842,12 @@ async def dashboard_stats(request: Request = None):
                                 with get_db_connection(dsn) as conn_t:
                                     cur_t = conn_t.cursor()
                                     try:
-                                        cur_t.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.eleitores")
+                                        cur_t.execute(f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Eleitores\"")
                                         total_eleitores = int(cur_t.fetchone()[0])
                                     except Exception:
                                         pass
                                     try:
-                                        cur_t.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.ativistas")
+                                        cur_t.execute(f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Ativistas\"")
                                         total_ativistas = int(cur_t.fetchone()[0])
                                     except Exception:
                                         pass
@@ -3112,14 +3858,14 @@ async def dashboard_stats(request: Request = None):
                                         pass
                                     try:
                                         cur_t.execute(
-                                            f"SELECT COALESCE(zona_eleitoral, 'N/D') AS zona, COUNT(*) AS qtd FROM {DB_SCHEMA}.eleitores GROUP BY zona_eleitoral ORDER BY qtd DESC LIMIT 20"
+                                            f"SELECT COALESCE(zona_eleitoral, 'N/D') AS zona, COUNT(*) AS qtd FROM \"{DB_SCHEMA}\".\"Eleitores\" GROUP BY zona_eleitoral ORDER BY qtd DESC LIMIT 20"
                                         )
                                         zonas_rows = cur_t.fetchall()
                                     except Exception:
                                         pass
                                     try:
                                         cur_t.execute(
-                                            f"SELECT COALESCE(tipo_apoio, 'N/D') AS funcao, COUNT(*) AS qtd FROM {DB_SCHEMA}.ativistas GROUP BY tipo_apoio ORDER BY qtd DESC LIMIT 20"
+                                            f"SELECT COALESCE(tipo_apoio, 'N/D') AS funcao, COUNT(*) AS qtd FROM \"{DB_SCHEMA}\".\"Ativistas\" GROUP BY tipo_apoio ORDER BY qtd DESC LIMIT 20"
                                         )
                                         ativistas_por_funcao_rows = cur_t.fetchall()
                                     except Exception:
@@ -3136,12 +3882,12 @@ async def dashboard_stats(request: Request = None):
                             with get_db_connection(dsn) as conn_t:
                                 cur_t = conn_t.cursor()
                                 try:
-                                    cur_t.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.eleitores")
+                                    cur_t.execute(f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Eleitores\"")
                                     total_eleitores += int(cur_t.fetchone()[0])
                                 except Exception:
                                     pass
                                 try:
-                                    cur_t.execute(f"SELECT COUNT(*) FROM {DB_SCHEMA}.ativistas")
+                                    cur_t.execute(f"SELECT COUNT(*) FROM \"{DB_SCHEMA}\".\"Ativistas\"")
                                     total_ativistas += int(cur_t.fetchone()[0])
                                 except Exception:
                                     pass
@@ -3152,7 +3898,7 @@ async def dashboard_stats(request: Request = None):
                                     pass
                                 try:
                                     cur_t.execute(
-                                        f"SELECT COALESCE(zona_eleitoral, 'N/D') AS zona, COUNT(*) AS qtd FROM {DB_SCHEMA}.eleitores GROUP BY zona_eleitoral"
+                                        f"SELECT COALESCE(zona_eleitoral, 'N/D') AS zona, COUNT(*) AS qtd FROM \"{DB_SCHEMA}\".\"Eleitores\" GROUP BY zona_eleitoral"
                                     )
                                     add_z = cur_t.fetchall()
                                     zonas_rows += add_z
@@ -3160,7 +3906,7 @@ async def dashboard_stats(request: Request = None):
                                     pass
                                 try:
                                     cur_t.execute(
-                                        f"SELECT COALESCE(tipo_apoio, 'N/D') AS funcao, COUNT(*) AS qtd FROM {DB_SCHEMA}.ativistas GROUP BY tipo_apoio"
+                                        f"SELECT COALESCE(tipo_apoio, 'N/D') AS funcao, COUNT(*) AS qtd FROM \"{DB_SCHEMA}\".\"Ativistas\" GROUP BY tipo_apoio"
                                     )
                                     add_a = cur_t.fetchall()
                                     ativistas_por_funcao_rows += add_a
@@ -3343,8 +4089,12 @@ async def tenants_delete_all(slug: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/tenants/recreate_db")
-async def tenants_recreate_db_body(body: dict):
+async def tenants_recreate_db_body(body: dict, request: Request):
     try:
+        slug_hdr = _tenant_slug(request)
+        if slug_hdr.lower() != 'captar':
+            raise HTTPException(status_code=403, detail="Apenas o tenant principal pode gerenciar tenants")
+
         slug = str(body.get('slug') or '').lower()
         if not slug:
             raise HTTPException(status_code=400, detail='slug obrigatório')
@@ -3355,8 +4105,12 @@ async def tenants_recreate_db_body(body: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/tenants/delete_all")
-async def tenants_delete_all_body(body: dict):
+async def tenants_delete_all_body(body: dict, request: Request):
     try:
+        slug_hdr = _tenant_slug(request)
+        if slug_hdr.lower() != 'captar':
+            raise HTTPException(status_code=403, detail="Apenas o tenant principal pode gerenciar tenants")
+
         slug = str(body.get('slug') or '').lower()
         if not slug:
             raise HTTPException(status_code=400, detail='slug obrigatório')
@@ -3367,8 +4121,12 @@ async def tenants_delete_all_body(body: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/tenants/{id}")
-async def tenants_update(id: int, payload: dict):
+async def tenants_update(id: int, payload: dict, request: Request):
     try:
+        slug_hdr = _tenant_slug(request)
+        if slug_hdr.lower() != 'captar':
+            raise HTTPException(status_code=403, detail="Apenas o tenant principal pode gerenciar tenants")
+
         cols_meta = get_table_columns("Tenant")
         allowed = {c["name"] for c in cols_meta if c["name"] != "IdTenant"}
         data = {k: v for k, v in payload.items() if k in allowed}
@@ -3392,13 +4150,19 @@ async def tenants_update(id: int, payload: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/tenants/{id}")
-async def tenants_delete(id: int):
+async def tenants_delete(id: int, request: Request):
     try:
+        slug_hdr = _tenant_slug(request)
+        if slug_hdr.lower() != 'captar':
+            raise HTTPException(status_code=403, detail="Apenas o tenant principal pode gerenciar tenants")
+
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(f"DELETE FROM \"{DB_SCHEMA}\".\"Tenant\" WHERE \"IdTenant\" = %s", (id,))
             conn.commit()
             return {"deleted": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -3415,7 +4179,7 @@ async def dashboard_top_usuarios(request: Request = None):
                     f"""
                     SELECT COALESCE(u."Nome", 'Desconhecido') AS usuario, COUNT(e.id) AS qtd
                     FROM \"{DB_SCHEMA}\".\"Usuarios\" u
-                    LEFT JOIN {DB_SCHEMA}.eleitores e ON e.criado_por = u."IdUsuario"
+                    LEFT JOIN \"{DB_SCHEMA}\".\"Eleitores\" e ON e.criado_por = u."IdUsuario"
                     GROUP BY u."Nome"
                     ORDER BY qtd DESC
                     LIMIT 10
@@ -3426,7 +4190,7 @@ async def dashboard_top_usuarios(request: Request = None):
                     f"""
                     SELECT COALESCE(u."Nome", 'Desconhecido') AS usuario, COUNT(e.id) AS qtd
                     FROM \"{DB_SCHEMA}\".\"Usuarios\" u
-                    LEFT JOIN {DB_SCHEMA}.eleitores e ON e.criado_por = u."IdUsuario"
+                    LEFT JOIN \"{DB_SCHEMA}\".\"Eleitores\" e ON e.criado_por = u."IdUsuario"
                     WHERE u."IdTenant" = %s
                     GROUP BY u."Nome"
                     ORDER BY qtd DESC
@@ -3449,7 +4213,7 @@ async def dashboard_top_ativistas(request: Request = None):
                 cursor.execute(
                     f"""
                     SELECT COALESCE(tipo_apoio, 'Desconhecido') AS categoria, COUNT(*) AS qtd
-                    FROM {DB_SCHEMA}.ativistas
+                    FROM "{DB_SCHEMA}"."Ativistas"
                     GROUP BY tipo_apoio
                     ORDER BY qtd DESC
                     LIMIT 10
@@ -3459,11 +4223,11 @@ async def dashboard_top_ativistas(request: Request = None):
                 try:
                     cursor.execute(
                         f"""
-                        SELECT COALESCE(a.tipo_apoio, 'Desconhecido') AS categoria, COUNT(*) AS qtd
-                        FROM {DB_SCHEMA}.ativistas a
-                        JOIN \"{DB_SCHEMA}\".\"Usuarios\" u ON a.criado_por = u."IdUsuario"
+                        SELECT COALESCE(a."TipoApoio", 'Desconhecido') AS categoria, COUNT(*) AS qtd
+                        FROM "{DB_SCHEMA}"."Ativistas" a
+                        JOIN "{DB_SCHEMA}"."Usuarios" u ON a."Cadastrante" = u."Nome"
                         WHERE u."IdTenant" = %s
-                        GROUP BY a.tipo_apoio
+                        GROUP BY a."TipoApoio"
                         ORDER BY qtd DESC
                         LIMIT 10
                         """,
@@ -3484,7 +4248,7 @@ async def dashboard_top_bairros():
             cursor.execute(
                 f"""
                 SELECT COALESCE(bairro, 'Desconhecido') AS bairro, COUNT(*) AS qtd
-                FROM {DB_SCHEMA}.eleitores
+                FROM \"{DB_SCHEMA}\".\"Eleitores\"
                 GROUP BY bairro
                 ORDER BY qtd DESC
                 LIMIT 10
@@ -3503,7 +4267,7 @@ async def dashboard_top_zonas():
             cursor.execute(
                 f"""
                 SELECT COALESCE(zona_eleitoral, 'Desconhecida') AS zona, COUNT(*) AS qtd
-                FROM {DB_SCHEMA}.eleitores
+                FROM \"{DB_SCHEMA}\".\"Eleitores\"
                 GROUP BY zona_eleitoral
                 ORDER BY qtd DESC
                 LIMIT 10
@@ -4010,14 +4774,15 @@ def _list_tenants_with_dsn():
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute(f'SELECT t."Slug", t."Nome", t."Dsn" FROM "{DB_SCHEMA}"."Tenant" t WHERE t."Dsn" IS NOT NULL AND t."Dsn" <> ''')
+            cur.execute(f'SELECT t."Slug", t."Nome", t."Dsn", t."IdTenant" FROM "{DB_SCHEMA}"."Tenant" t WHERE t."Dsn" IS NOT NULL AND t."Dsn" <> \'\'')
             rows = cur.fetchall()
             for r in rows:
                 slug = str(r[0] or '')
                 nome = str(r[1] or '')
                 dsn = str(r[2] or '')
+                idt = int(r[3] or 0)
                 if dsn:
-                    out.append((slug, nome, dsn))
+                    out.append((slug, nome, dsn, idt))
     except Exception:
         pass
     return out
@@ -4049,9 +4814,10 @@ async def eleitores_list(limit: int = 500, request: Request = None):
         view = request and request.headers.get('X-View-Tenant') or None
         s = str(slug or '').lower()
         if s != 'captar':
+            tid = _tenant_id_from_header(request)
             with get_conn_for_request(request) as conn:
                 cur = conn.cursor()
-                cur.execute(f"SELECT e.* FROM {DB_SCHEMA}.eleitores e ORDER BY 1 ASC LIMIT %s", (limit,))
+                cur.execute(f"SELECT e.* FROM \"{DB_SCHEMA}\".\"Eleitores\" e WHERE \"IdTenant\" = %s ORDER BY 1 ASC LIMIT %s", (tid, limit))
                 cols = [d[0] for d in cur.description]
                 rows = cur.fetchall()
                 data = [dict(zip(cols, r)) for r in rows]
@@ -4066,7 +4832,8 @@ async def eleitores_list(limit: int = 500, request: Request = None):
             if view_s == 'captar':
                 with get_db_connection() as conn_c:
                     cur_c = conn_c.cursor()
-                    cur_c.execute(f"SELECT e.* FROM {DB_SCHEMA}.eleitores e ORDER BY 1 ASC LIMIT %s", (limit,))
+                    tid = _ensure_tenant_slug('captar')
+                    cur_c.execute(f"SELECT e.* FROM \"{DB_SCHEMA}\".\"Eleitores\" e WHERE \"IdTenant\" = %s ORDER BY 1 ASC LIMIT %s", (tid, limit))
                     cols_c = [d[0] for d in cur_c.description]
                     rows_c = cur_c.fetchall()
                     data = [dict(zip(cols_c, r)) for r in rows_c]
@@ -4078,9 +4845,21 @@ async def eleitores_list(limit: int = 500, request: Request = None):
             dsn = _get_dsn_by_slug(view_s)
             if dsn:
                 try:
+                    idt = None
+                    try:
+                        with get_db_connection() as conn_meta:
+                            cur_meta = conn_meta.cursor()
+                            cur_meta.execute(f'SELECT "IdTenant" FROM "{DB_SCHEMA}"."Tenant" WHERE LOWER("Slug") = %s', (view_s,))
+                            row_meta = cur_meta.fetchone()
+                            idt = row_meta[0] if row_meta else None
+                    except Exception:
+                        pass
                     with get_db_connection(dsn) as conn_t:
                         cur_t = conn_t.cursor()
-                        cur_t.execute(f"SELECT e.* FROM {DB_SCHEMA}.eleitores e ORDER BY 1 ASC LIMIT %s", (limit,))
+                        if idt:
+                            cur_t.execute(f"SELECT e.* FROM \"{DB_SCHEMA}\".\"Eleitores\" e WHERE \"IdTenant\" = %s ORDER BY 1 ASC LIMIT %s", (idt, limit))
+                        else:
+                            cur_t.execute(f"SELECT e.* FROM \"{DB_SCHEMA}\".\"Eleitores\" e ORDER BY 1 ASC LIMIT %s", (limit,))
                         cols_t = [d[0] for d in cur_t.description]
                         rows_t = cur_t.fetchall()
                         data = [dict(zip(cols_t, r)) for r in rows_t]
@@ -4113,9 +4892,10 @@ async def ativistas_list(limit: int = 500, request: Request = None):
         view = request and request.headers.get('X-View-Tenant') or None
         s = str(slug or '').lower()
         if s != 'captar':
+            tid = _tenant_id_from_header(request)
             with get_conn_for_request(request) as conn:
                 cur = conn.cursor()
-                cur.execute(f"SELECT a.* FROM {DB_SCHEMA}.ativistas a ORDER BY 1 ASC LIMIT %s", (limit,))
+                cur.execute(f"SELECT a.* FROM \"{DB_SCHEMA}\".\"Ativistas\" a WHERE \"IdTenant\" = %s ORDER BY 1 ASC LIMIT %s", (tid, limit))
                 cols = [d[0] for d in cur.description]
                 rows = cur.fetchall()
                 data = [dict(zip(cols, r)) for r in rows]
@@ -4130,7 +4910,8 @@ async def ativistas_list(limit: int = 500, request: Request = None):
             if view_s == 'captar':
                 with get_db_connection() as conn_c:
                     cur_c = conn_c.cursor()
-                    cur_c.execute(f"SELECT a.* FROM {DB_SCHEMA}.ativistas a ORDER BY 1 ASC LIMIT %s", (limit,))
+                    tid = _ensure_tenant_slug('captar')
+                    cur_c.execute(f"SELECT a.* FROM \"{DB_SCHEMA}\".\"Ativistas\" a WHERE \"IdTenant\" = %s ORDER BY 1 ASC LIMIT %s", (tid, limit))
                     cols_c = [d[0] for d in cur_c.description]
                     rows_c = cur_c.fetchall()
                     data = [dict(zip(cols_c, r)) for r in rows_c]
@@ -4142,9 +4923,21 @@ async def ativistas_list(limit: int = 500, request: Request = None):
             dsn = _get_dsn_by_slug(view_s)
             if dsn:
                 try:
+                    idt = None
+                    try:
+                        with get_db_connection() as conn_meta:
+                            cur_meta = conn_meta.cursor()
+                            cur_meta.execute(f'SELECT "IdTenant" FROM "{DB_SCHEMA}"."Tenant" WHERE LOWER("Slug") = %s', (view_s,))
+                            row_meta = cur_meta.fetchone()
+                            idt = row_meta[0] if row_meta else None
+                    except Exception:
+                        pass
                     with get_db_connection(dsn) as conn_t:
                         cur_t = conn_t.cursor()
-                        cur_t.execute(f"SELECT a.* FROM {DB_SCHEMA}.ativistas a ORDER BY 1 ASC LIMIT %s", (limit,))
+                        if idt:
+                            cur_t.execute(f"SELECT a.* FROM \"{DB_SCHEMA}\".\"Ativistas\" a WHERE \"IdTenant\" = %s ORDER BY 1 ASC LIMIT %s", (idt, limit))
+                        else:
+                            cur_t.execute(f"SELECT a.* FROM \"{DB_SCHEMA}\".\"Ativistas\" a ORDER BY 1 ASC LIMIT %s", (limit,))
                         cols_t = [d[0] for d in cur_t.description]
                         rows_t = cur_t.fetchall()
                         data = [dict(zip(cols_t, r)) for r in rows_t]
@@ -4307,7 +5100,8 @@ async def candidatos_list(limit: int = 200, request: Request = None):
                 )
             except Exception:
                 pass
-            cur.execute(f'SELECT c.* FROM "{DB_SCHEMA}"."Candidatos" c ORDER BY 1 ASC LIMIT %s', (limit,))
+            tid = _ensure_tenant_slug('captar')
+            cur.execute(f'SELECT c.* FROM "{DB_SCHEMA}"."Candidatos" c WHERE "IdTenant" = %s ORDER BY 1 ASC LIMIT %s', (tid, limit))
             cols_c = [d[0] for d in cur.description]
             union_cols.update(cols_c)
             rows_c = cur.fetchall()
@@ -4315,12 +5109,12 @@ async def candidatos_list(limit: int = 200, request: Request = None):
                 d = dict(zip(cols_c, r))
                 d['TenantLayer'] = 'CAPTAR'
                 out_rows.append(d)
-        for slug_row, nome_row, dsn_row in _list_tenants_with_dsn():
+        for slug_row, nome_row, dsn_row, idt_row in _list_tenants_with_dsn():
             if not dsn_row:
                 continue
             with get_db_connection(dsn_row) as conn:
                 cur = conn.cursor()
-                cur.execute(f'SELECT c.* FROM "{DB_SCHEMA}"."Candidatos" c ORDER BY 1 ASC LIMIT %s', (limit,))
+                cur.execute(f'SELECT c.* FROM "{DB_SCHEMA}"."Candidatos" c WHERE "IdTenant" = %s ORDER BY 1 ASC LIMIT %s', (idt_row, limit))
                 cols_t = [d[0] for d in cur.description]
                 union_cols.update(cols_t)
                 rows_t = cur.fetchall()
@@ -4478,7 +5272,8 @@ async def eleicoes_list(limit: int = 200, request: Request = None):
                 )
             except Exception:
                 pass
-            cur.execute(f'SELECT e.* FROM "{DB_SCHEMA}"."Eleicoes" e ORDER BY 1 ASC LIMIT %s', (limit,))
+            tid = _ensure_tenant_slug('captar')
+            cur.execute(f'SELECT e.* FROM "{DB_SCHEMA}"."Eleicoes" e WHERE "IdTenant" = %s ORDER BY 1 ASC LIMIT %s', (tid, limit))
             cols_c = [d[0] for d in cur.description]
             union_cols.update(cols_c)
             rows_c = cur.fetchall()
@@ -4486,7 +5281,7 @@ async def eleicoes_list(limit: int = 200, request: Request = None):
                 d = dict(zip(cols_c, r))
                 d['TenantLayer'] = 'CAPTAR'
                 out_rows.append(d)
-        for slug_row, nome_row, dsn_row in _list_tenants_with_dsn():
+        for slug_row, nome_row, dsn_row, idt_row in _list_tenants_with_dsn():
             if not dsn_row:
                 continue
             with get_db_connection(dsn_row) as conn:
@@ -4513,7 +5308,7 @@ async def eleicoes_list(limit: int = 200, request: Request = None):
                     )
                 except Exception:
                     pass
-                cur.execute(f'SELECT e.* FROM "{DB_SCHEMA}"."Eleicoes" e ORDER BY 1 ASC LIMIT %s', (limit,))
+                cur.execute(f'SELECT e.* FROM "{DB_SCHEMA}"."Eleicoes" e WHERE "IdTenant" = %s ORDER BY 1 ASC LIMIT %s', (idt_row, limit))
                 cols_t = [d[0] for d in cur.description]
                 union_cols.update(cols_t)
                 rows_t = cur.fetchall()
@@ -4691,7 +5486,8 @@ async def metas_list(limit: int = 200, request: Request = None):
                 )
             except Exception:
                 pass
-            cur.execute(f'SELECT m.* FROM "{DB_SCHEMA}"."Metas" m ORDER BY 1 ASC LIMIT %s', (limit,))
+            tid = _ensure_tenant_slug('captar')
+            cur.execute(f'SELECT m.* FROM "{DB_SCHEMA}"."Metas" m WHERE "IdTenant" = %s ORDER BY 1 ASC LIMIT %s', (tid, limit))
             cols_c = [d[0] for d in cur.description]
             union_cols.update(cols_c)
             rows_c = cur.fetchall()
@@ -4699,7 +5495,7 @@ async def metas_list(limit: int = 200, request: Request = None):
                 d = dict(zip(cols_c, r))
                 d['TenantLayer'] = 'CAPTAR'
                 out_rows.append(d)
-        for slug_row, nome_row, dsn_row in _list_tenants_with_dsn():
+        for slug_row, nome_row, dsn_row, idt_row in _list_tenants_with_dsn():
             if not dsn_row:
                 continue
             with get_db_connection(dsn_row) as conn:
@@ -4731,7 +5527,7 @@ async def metas_list(limit: int = 200, request: Request = None):
                     )
                 except Exception:
                     pass
-                cur.execute(f'SELECT m.* FROM "{DB_SCHEMA}"."Metas" m ORDER BY 1 ASC LIMIT %s', (limit,))
+                cur.execute(f'SELECT m.* FROM "{DB_SCHEMA}"."Metas" m WHERE "IdTenant" = %s ORDER BY 1 ASC LIMIT %s', (idt_row, limit))
                 cols_t = [d[0] for d in cur.description]
                 union_cols.update(cols_t)
                 rows_t = cur.fetchall()
@@ -4846,6 +5642,10 @@ async def metas_update(id: int, payload: dict, request: Request = None):
             raise HTTPException(status_code=400, detail="Sem campos válidos")
         set_parts = ", ".join([f'"{k}"=%s' for k in keys])
         values = [data[k] for k in keys]
+        
+        # Get tenant ID for safety
+        tid = _tenant_id_from_header(request)
+
         s = (request and request.headers.get('X-Tenant') or 'captar').lower()
         view = (request and request.headers.get('X-View-Tenant') or '').lower()
         target_conn = None
@@ -4890,8 +5690,8 @@ async def metas_update(id: int, payload: dict, request: Request = None):
             except Exception:
                 pass
             cur.execute(
-                f"UPDATE \"{DB_SCHEMA}\".\"Metas\" SET {set_parts} WHERE \"IdMeta\" = %s",
-                tuple(values + [id])
+                f"UPDATE \"{DB_SCHEMA}\".\"Metas\" SET {set_parts} WHERE \"IdMeta\" = %s AND \"IdTenant\" = %s",
+                tuple(values + [id, tid])
             )
             conn.commit()
             return {"id": id}
@@ -4901,6 +5701,7 @@ async def metas_update(id: int, payload: dict, request: Request = None):
 @app.delete("/api/metas/{id}")
 async def metas_delete(id: int, request: Request = None):
     try:
+        tid = _tenant_id_from_header(request)
         s = (request and request.headers.get('X-Tenant') or 'captar').lower()
         view = (request and request.headers.get('X-View-Tenant') or '').lower()
         target_conn = None
@@ -4917,7 +5718,7 @@ async def metas_delete(id: int, request: Request = None):
             target_conn = get_db_connection()
         with target_conn as conn:
             cur = conn.cursor()
-            cur.execute(f'DELETE FROM "{DB_SCHEMA}"."Metas" WHERE "IdMeta" = %s', (id,))
+            cur.execute(f'DELETE FROM "{DB_SCHEMA}"."Metas" WHERE "IdMeta" = %s AND "IdTenant" = %s', (id, tid))
             conn.commit()
             return {"deleted": True}
     except Exception as e:
@@ -5014,6 +5815,10 @@ async def eleicoes_update(id: int, payload: dict, request: Request = None):
             raise HTTPException(status_code=400, detail="Sem campos válidos")
         set_parts = ", ".join([f'"{k}"=%s' for k in keys])
         values = [data[k] for k in keys]
+        
+        # Get tenant ID for safety
+        tid = _tenant_id_from_header(request)
+
         s = (request and request.headers.get('X-Tenant') or 'captar').lower()
         view = (request and request.headers.get('X-View-Tenant') or '').lower()
         target_conn = None
@@ -5053,8 +5858,8 @@ async def eleicoes_update(id: int, payload: dict, request: Request = None):
             except Exception:
                 pass
             cur.execute(
-                f"UPDATE \"{DB_SCHEMA}\".\"Eleicoes\" SET {set_parts} WHERE \"IdEleicao\" = %s",
-                tuple(values + [id])
+                f"UPDATE \"{DB_SCHEMA}\".\"Eleicoes\" SET {set_parts} WHERE \"IdEleicao\" = %s AND \"IdTenant\" = %s",
+                tuple(values + [id, tid])
             )
             conn.commit()
             return {"id": id}
@@ -5064,6 +5869,7 @@ async def eleicoes_update(id: int, payload: dict, request: Request = None):
 @app.delete("/api/eleicoes/{id}")
 async def eleicoes_delete(id: int, request: Request = None):
     try:
+        tid = _tenant_id_from_header(request)
         s = (request and request.headers.get('X-Tenant') or 'captar').lower()
         view = (request and request.headers.get('X-View-Tenant') or '').lower()
         target_conn = None
@@ -5080,7 +5886,7 @@ async def eleicoes_delete(id: int, request: Request = None):
             target_conn = get_db_connection()
         with target_conn as conn:
             cur = conn.cursor()
-            cur.execute(f'DELETE FROM "{DB_SCHEMA}"."Eleicoes" WHERE "IdEleicao" = %s', (id,))
+            cur.execute(f'DELETE FROM "{DB_SCHEMA}"."Eleicoes" WHERE "IdEleicao" = %s AND "IdTenant" = %s', (id, tid))
             conn.commit()
             return {"deleted": True}
     except Exception as e:
@@ -5188,6 +5994,10 @@ async def candidatos_update(id: int, payload: dict, request: Request = None):
             raise HTTPException(status_code=400, detail="Sem campos válidos")
         set_parts = ", ".join([f'"{k}"=%s' for k in keys])
         values = [data[k] for k in keys]
+        
+        # Get tenant ID for safety
+        tid = _tenant_id_from_header(request)
+
         s = (request and request.headers.get('X-Tenant') or 'captar').lower()
         view = (request and request.headers.get('X-View-Tenant') or '').lower()
         target_conn = None
@@ -5226,8 +6036,8 @@ async def candidatos_update(id: int, payload: dict, request: Request = None):
             except Exception:
                 pass
             cur.execute(
-                f"UPDATE \"{DB_SCHEMA}\".\"Candidatos\" SET {set_parts} WHERE \"IdCandidato\" = %s",
-                tuple(values + [id])
+                f"UPDATE \"{DB_SCHEMA}\".\"Candidatos\" SET {set_parts} WHERE \"IdCandidato\" = %s AND \"IdTenant\" = %s",
+                tuple(values + [id, tid])
             )
             conn.commit()
             return {"id": id}
@@ -5237,6 +6047,7 @@ async def candidatos_update(id: int, payload: dict, request: Request = None):
 @app.delete("/api/candidatos/{id}")
 async def candidatos_delete(id: int, request: Request = None):
     try:
+        tid = _tenant_id_from_header(request)
         s = (request and request.headers.get('X-Tenant') or 'captar').lower()
         view = (request and request.headers.get('X-View-Tenant') or '').lower()
         target_conn = None
@@ -5253,7 +6064,7 @@ async def candidatos_delete(id: int, request: Request = None):
             target_conn = get_db_connection()
         with target_conn as conn:
             cur = conn.cursor()
-            cur.execute(f'DELETE FROM "{DB_SCHEMA}"."Candidatos" WHERE "IdCandidato" = %s', (id,))
+            cur.execute(f'DELETE FROM "{DB_SCHEMA}"."Candidatos" WHERE "IdCandidato" = %s AND "IdTenant" = %s', (id, tid))
             conn.commit()
             return {"deleted": True}
     except Exception as e:

@@ -39,6 +39,8 @@ services:
       - DB_HOST=postgres
       - REDIS_HOST=redis
       - MONGO_HOST=mongodb
+    volumes:
+      - ./Backend/FastAPI/static:/app/static
     ports:
       - "${FASTAPI_HOST_PORT}:8000"
     expose:

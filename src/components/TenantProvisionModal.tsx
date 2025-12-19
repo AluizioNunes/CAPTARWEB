@@ -1,4 +1,4 @@
-import { Modal, Form, Input, Button, Space, message, Avatar } from 'antd'
+import { Modal, Form, Input, Button, Space, Avatar, App } from 'antd'
 import { SaveOutlined, CloseCircleOutlined } from '@ant-design/icons'
 import { useApi } from '../context/ApiContext'
 import { useEffect, useMemo, useState } from 'react'
@@ -18,6 +18,7 @@ export default function TenantProvisionModal({ open, initial, onCancel, onSaved 
   const [form] = Form.useForm()
   const api = useApi()
   const { user } = useAuthStore()
+  const { message } = App.useApp()
   const [connectionText, setConnectionText] = useState('')
   const loginDateObj = useMemo(() => {
     const lt = (user as any)?.login_time

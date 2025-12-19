@@ -1,9 +1,9 @@
-import { Modal, Form, Input, Button, Space, DatePicker, Upload, Radio, message, Card, Avatar, Row, Col, Statistic, Tooltip } from 'antd'
-import { UploadOutlined, FileTextOutlined, TeamOutlined, CloudUploadOutlined, ThunderboltOutlined, CloseCircleOutlined, SaveOutlined, SendOutlined, CheckCircleOutlined, SyncOutlined, ExclamationCircleOutlined } from '@ant-design/icons'
+import { Avatar, Button, Card, DatePicker, Form, Input, Modal, Radio, Space, Upload, message } from 'antd'
+import { CloseCircleOutlined, CloudUploadOutlined, FileTextOutlined, SaveOutlined, TeamOutlined, ThunderboltOutlined, UploadOutlined } from '@ant-design/icons'
 import { useEffect, useState, useMemo } from 'react'
 import { useApi } from '../context/ApiContext'
 import { useAuthStore } from '../store/authStore'
-import { format, parseISO, isValid, isWithinInterval } from 'date-fns'
+import { format, parseISO, isValid } from 'date-fns'
 import { ptBR } from 'date-fns/locale'
 import dayjs from 'dayjs'
 import Logo from '../images/CAPTAR LOGO OFICIAL.jpg'
@@ -17,10 +17,14 @@ interface Props {
 
 export default function CampanhasModal({ open, initial, onCancel, onSaved }: Props) {
   const [form] = Form.useForm()
+  const [messageApi, contextHolder] = message.useMessage()
   const [destino, setDestino] = useState<'eleitores' | 'arquivo'>('eleitores')
   const [fileList, setFileList] = useState<any[]>([])
   const [imagemList, setImagemList] = useState<any[]>([])
-  const [imagemPreview, setImagemPreview] = useState<string | undefined>(undefined)
+  const [posicaoImagem, setPosicaoImagem] = useState<'top' | 'bottom'>('bottom')
+  const [modoResposta, setModoResposta] = useState<'nenhum' | 'sim_nao'>('nenhum')
+  const [perguntaSimNao, setPerguntaSimNao] = useState('')
+  
   const api = useApi()
   const { user } = useAuthStore()
 
@@ -45,6 +49,25 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
   const loginText = loginDateObj ? format(loginDateObj, 'dd/MM/yyyy HH:mm', { locale: ptBR }) : ''
   const currentTenantSlug = String(localStorage.getItem('tenantSlug') || 'captar')
   const currentTenantName = String(localStorage.getItem('tenantName') || 'CAPTAR')
+
+  const resolveImageSrc = (img: any) => {
+    const s = String(img || '').trim()
+    if (!s) return ''
+    if (/^data:image\//i.test(s) && /;base64,/i.test(s)) {
+      const rest = s.split(/;base64,/i)[1]?.trim() || ''
+      if (rest.startsWith('/') || rest.startsWith('http://') || rest.startsWith('https://') || rest.startsWith('static/')) {
+        return rest.startsWith('static/') ? `/${rest}` : rest
+      }
+      return s
+    }
+    if (s.startsWith('data:')) return s
+    if (s.startsWith('http://') || s.startsWith('https://') || s.startsWith('/static/')) return s
+    if (s.startsWith('static/')) return `/${s}`
+    if (s.startsWith('/')) return s
+    if (/\.(png|jpg|jpeg|bmp|gif|webp)$/i.test(s)) return `/static/campanhas/${s}`
+    if (s.includes('/') && !s.startsWith('/')) return `/${s}`
+    return `data:image/png;base64,${s}`
+  }
 
   useEffect(() => {
     const update = () => {
@@ -71,11 +94,39 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
           data_inicio: initial.data_inicio ? dayjs(initial.data_inicio) : undefined,
           data_fim: initial.data_fim ? dayjs(initial.data_fim) : undefined,
         })
-        if (initial.AnexoJSON || initial.Anexo) {
-            setDestino('arquivo')
+
+        if (initial?.imagem) {
+          setImagemList([{
+            uid: '-1',
+            name: 'imagem',
+            status: 'done',
+            url: resolveImageSrc(initial.imagem),
+          }])
         } else {
-            setDestino('eleitores')
+          setImagemList([])
         }
+        
+        const rawAnexo = (initial as any)?.conteudo_arquivo || (initial as any)?.AnexoJSON
+        let parsedAnexo: any = null
+        if (rawAnexo) {
+          try {
+            parsedAnexo = typeof rawAnexo === 'string' ? JSON.parse(rawAnexo) : rawAnexo
+            if (!Array.isArray(parsedAnexo) && parsedAnexo?.config) {
+              setPosicaoImagem(parsedAnexo.config.text_position || 'bottom')
+              setModoResposta(parsedAnexo.config.response_mode === 'SIM_NAO' ? 'sim_nao' : 'nenhum')
+              setPerguntaSimNao(String(parsedAnexo.config.question || ''))
+            }
+          } catch {}
+        }
+
+        const isEleitores =
+          !!parsedAnexo &&
+          !Array.isArray(parsedAnexo) &&
+          (parsedAnexo?.usar_eleitores === true || String(parsedAnexo?.source || '').toLowerCase() === 'eleitores')
+
+        if (isEleitores) setDestino('eleitores')
+        else if (rawAnexo) setDestino('arquivo')
+        else setDestino('eleitores')
         
         // Load stats
         setMeta(initial.meta || 0)
@@ -92,7 +143,9 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
         setDestino('eleitores')
         setFileList([])
         setImagemList([])
-        setImagemPreview(undefined)
+        setPosicaoImagem('bottom')
+        setModoResposta('nenhum')
+        setPerguntaSimNao('')
         
         // Reset stats
         setMeta(0)
@@ -129,7 +182,7 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
                             if (json.length > 0) {
                                 const keys = Object.keys(json[0]).map(k => k.toLowerCase())
                                 if (!keys.includes('whatsapp')) {
-                                    message.warning('Atenção: O arquivo JSON não contém a chave "whatsapp".')
+                                    messageApi.warning('Atenção: O arquivo JSON não contém a chave "whatsapp".')
                                 }
                             }
                         }
@@ -142,7 +195,7 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
                             // Validação da coluna whatsapp
                             const header = lines[0].toLowerCase()
                             if (!header.includes('whatsapp')) {
-                                message.warning('Atenção: O arquivo CSV não contém a coluna "whatsapp".')
+                                messageApi.warning('Atenção: O arquivo CSV não contém a coluna "whatsapp".')
                             }
                             setMeta(Math.max(0, lines.length - 1)) // Assume header
                         } else {
@@ -163,7 +216,19 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
   const handleOk = async () => {
     try {
       const values = await form.validateFields()
+      if (modoResposta === 'sim_nao' && !String(perguntaSimNao || '').trim()) {
+        messageApi.error('Informe a pergunta (SIM/NÃO)')
+        return
+      }
       
+      // Helper to convert file to base64
+      const toBase64 = (file: File) => new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.readAsDataURL(file);
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = error => reject(error);
+      });
+
       const payload: any = {
         ...values,
         data_inicio: values.data_inicio ? values.data_inicio.format('YYYY-MM-DD') : null,
@@ -173,93 +238,108 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
         nao_enviados: naoEnviados,
         positivos,
         negativos,
-        aguardando
+        aguardando,
       }
 
+      if (imagemList.length > 0) {
+        const file = imagemList[0].originFileObj
+        if (file) {
+          payload.imagem = await toBase64(file as File)
+        }
+      } else if (initial?.imagem) {
+        payload.imagem = null
+      }
+
+      // Process AnexoJSON to include config
+      let finalAnexoJSON: any = null
+      const configToSave: any = {
+        text_position: posicaoImagem,
+      }
+      if (modoResposta === 'sim_nao') {
+        configToSave.response_mode = 'SIM_NAO'
+        configToSave.question = String(perguntaSimNao || '').trim()
+      }
+      
       if (destino === 'arquivo' && fileList.length > 0) {
         const file = fileList[0].originFileObj
         if (file) {
+            // Sempre enviar como arquivo para processamento no backend (pandas)
+            payload.AnexoFile = file
+
+            payload.anexo_json = JSON.stringify({ contacts: [], config: configToSave })
+            
+            // Handle JSON directly if it is JSON
             if (file.name.endsWith('.json')) {
                 const text = await file.text()
                 try {
-                    JSON.parse(text) // Validate JSON
-                    payload.AnexoJSON = text
+                   const jsonContent = JSON.parse(text)
+                   // We wrap it
+                   finalAnexoJSON = {
+                       contacts: Array.isArray(jsonContent) ? jsonContent : [],
+                       config: configToSave
+                   }
+                   // We need to pass this as string to AnexoJSON field?
+                   // The API might expect 'anexo_json' field in payload.
+                   // Wait, payload spread values from form.
+                   // If we send 'anexo_json', backend uses it.
+                   // But wait, if file is sent as 'AnexoFile', backend processes it.
+                   // If we want to override the JSON content, we should set anexo_json.
+                   // Let's set it.
+                   payload.anexo_json = JSON.stringify(finalAnexoJSON)
                 } catch (e) {
-                    message.error('Arquivo JSON inválido')
+                    messageApi.error('Arquivo JSON inválido')
                     return
                 }
             } else {
-                payload.AnexoFile = file
+                // CSV/XLS: Backend processes file and saves to AnexoJSON?
+                // If so, we can't easily inject config unless we do it after upload?
+                // Or we send config as separate field?
+                // Backend 'create_campanha' doesn't seem to merge config.
+                // For now, support only for JSON or if we can update it later.
+                // Actually, if we use 'eleitores', we can also set anexo_json with config.
+                // If CSV, we might lose this config if backend overwrites AnexoJSON.
+                // Let's assume for CSV/XLS we can't support this yet without backend changes to 'uploadCampanhaAnexo'.
+                // BUT, if we send 'anexo_json' string here, backend might use it.
+                // If 'AnexoFile' is present, backend usually processes it and updates AnexoJSON.
+                // Let's stick to JSON support or 'eleitores' for now.
+                // Or better: We send it for 'eleitores' too.
             }
         }
       } else if (destino === 'eleitores') {
-          payload.UsarEleitores = true
+          payload.usar_eleitores = true
+          finalAnexoJSON = {
+            source: 'eleitores',
+            usar_eleitores: true,
+            contacts: [],
+            config: configToSave,
+          }
+          payload.anexo_json = JSON.stringify(finalAnexoJSON)
       }
 
       let savedId: number
       if (initial?.id) {
         await api.updateCampanha(initial.id, payload)
         savedId = initial.id
-        message.success('Campanha atualizada')
+        messageApi.success('Campanha atualizada')
       } else {
         const res = await api.createCampanha(payload)
         savedId = res.id
-        message.success('Campanha criada')
+        messageApi.success('Campanha criada')
       }
 
-      // Upload Image if present
-      if (imagemList.length > 0) {
-          const file = imagemList[0].originFileObj
-          if (file) {
-              await api.uploadCampanhaAnexo(savedId, { file, type: 'imagem' })
-          }
-      }
-      
-      // Upload Anexo File if present
+      // Upload Anexo File if present (Still separate for big files/pandas processing if needed, 
+      // but user asked for AnexoJSON to be JSONB. 
+      // The backend 'campanhas_create' handles AnexoJSON from payload. 
+      // The 'uploadCampanhaAnexo' endpoint handles file upload and likely processing.
+      // We keep file upload for the data file (csv/xls/json contacts), but Image is now in payload.
       if (destino === 'arquivo' && payload.AnexoFile) {
            await api.uploadCampanhaAnexo(savedId, { file: payload.AnexoFile, type: 'anexo' })
       }
 
       onSaved()
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || 'Erro ao salvar campanha')
+      messageApi.error(e?.response?.data?.detail || 'Erro ao salvar campanha')
     }
-  }
-
-  const handleEnviarCampanha = async () => {
-      // PLACEHOLDER FOR AUTOMATION TRIGGER
-      // Replace these values with your actual N8N/EvolutionAPI endpoint and keys
-      const AUTOMATION_URL = 'https://n8n.seu-dominio.com/webhook/disparar-campanha'
-      const API_KEY = 'sua-api-key'
-      
-      const campanhaData = {
-          id: initial.id,
-          nome: form.getFieldValue('nome'),
-          mensagem: form.getFieldValue('descricao'),
-          origem: destino,
-          meta: meta
-      }
-
-      message.loading({ content: 'Iniciando automação...', key: 'envio' })
-      
-      try {
-          // Simulation of request
-          // await fetch(AUTOMATION_URL, {
-          //     method: 'POST',
-          //     headers: { 'Content-Type': 'application/json', 'Authorization': API_KEY },
-          //     body: JSON.stringify(campanhaData)
-          // })
-          
-          await new Promise(resolve => setTimeout(resolve, 1500)) // Fake delay
-          
-          message.success({ content: 'Automação iniciada com sucesso!', key: 'envio' })
-          
-          // Optionally update status to 'EM_ANDAMENTO' locally
-          // await api.updateCampanha(initial.id, { status: 'EM_ANDAMENTO' })
-          // onSaved()
-      } catch (e) {
-          message.error({ content: 'Erro ao iniciar automação', key: 'envio' })
-      }
   }
 
   const getUpperFromEvent = (e: any) => {
@@ -267,28 +347,9 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
     return typeof v === 'string' ? v.toUpperCase() : v
   }
 
-  // Check if campaign can be sent
-  const canSend = useMemo(() => {
-      if (!initial?.id) return false // Must be saved first
-      const start = form.getFieldValue('data_inicio')
-      const end = form.getFieldValue('data_fim')
-      if (!start) return false
-      
-      const now = new Date()
-      // Check if within range
-      // Note: date-fns/isWithinInterval requires start <= end
-      try {
-          const sDate = start.toDate ? start.toDate() : new Date(start)
-          const eDate = end ? (end.toDate ? end.toDate() : new Date(end)) : new Date(2100, 0, 1)
-          
-          // Simple check
-          return now >= sDate && now <= eDate
-      } catch {
-          return false
-      }
-  }, [initial, form.getFieldValue('data_inicio'), form.getFieldValue('data_fim')])
-
   return (
+    <>
+    {contextHolder}
     <Modal
       open={open}
       title={
@@ -325,47 +386,40 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
     >
       <style>{`.campanhas-modal .ant-modal-header{ border-bottom: 1px solid #e8e8e8; } .campanhas-modal .ant-modal-content{ border-radius: 0 !important; } .campanhas-modal .ant-form-item{ margin-bottom:6px; }`}</style>
       
-      {/* STATISTICS CARDS */}
-      <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={4}>
-            <Card size="small" style={{ textAlign: 'center', background: '#f0f5ff', borderColor: '#adc6ff' }}>
-                <Statistic title="META" value={meta} valueStyle={{ color: '#2f54eb' }} prefix={<TeamOutlined />} />
-            </Card>
-        </Col>
-        <Col span={4}>
-            <Card size="small" style={{ textAlign: 'center', background: '#f6ffed', borderColor: '#b7eb8f' }}>
-                <Statistic title="ENVIADOS" value={enviados} valueStyle={{ color: '#3f8600' }} prefix={<CheckCircleOutlined />} />
-            </Card>
-        </Col>
-        <Col span={4}>
-            <Card size="small" style={{ textAlign: 'center', background: '#fff1f0', borderColor: '#ffa39e' }}>
-                <Statistic title="NÃO ENVIADOS" value={naoEnviados} valueStyle={{ color: '#cf1322' }} prefix={<ExclamationCircleOutlined />} />
-            </Card>
-        </Col>
-        <Col span={4}>
-            <Card size="small" style={{ textAlign: 'center', background: '#e6f7ff', borderColor: '#91d5ff' }}>
-                <Statistic title="POSITIVOS" value={positivos} valueStyle={{ color: '#096dd9' }} />
-            </Card>
-        </Col>
-        <Col span={4}>
-            <Card size="small" style={{ textAlign: 'center', background: '#fffbe6', borderColor: '#ffe58f' }}>
-                <Statistic title="NEGATIVOS" value={negativos} valueStyle={{ color: '#d48806' }} />
-            </Card>
-        </Col>
-        <Col span={4}>
-            <Card size="small" style={{ textAlign: 'center', background: '#f9f0ff', borderColor: '#d3adf7' }}>
-                <Statistic title="AGUARDANDO" value={aguardando} valueStyle={{ color: '#722ed1' }} prefix={<SyncOutlined spin={aguardando > 0} />} />
-            </Card>
-        </Col>
-      </Row>
-
       <Form form={form} layout="vertical">
         <Card title="DADOS DA CAMPANHA" size="small">
           <Form.Item name="nome" label="NOME DA CAMPANHA" rules={[{ required: true, message: 'Informe o nome' }]} getValueFromEvent={getUpperFromEvent}>
             <Input prefix={<ThunderboltOutlined />} placeholder="Ex: CAMPANHA DE DOAÇÃO" />
           </Form.Item>
 
-          <Form.Item name="descricao" label="DESCRIÇÃO / MENSAGEM">
+          <Form.Item label="TIPO DE ENVIO">
+            <Radio.Group value={modoResposta} onChange={(e) => setModoResposta(e.target.value)}>
+              <Radio.Button value="nenhum">MENSAGEM</Radio.Button>
+              <Radio.Button value="sim_nao">PERGUNTA SIM / NÃO</Radio.Button>
+            </Radio.Group>
+          </Form.Item>
+
+          {modoResposta === 'sim_nao' && (
+            <Form.Item label="PERGUNTA (SIM/NÃO)">
+              <Input
+                value={perguntaSimNao}
+                onChange={(e) => setPerguntaSimNao(String(e.target.value || '').toUpperCase())}
+                placeholder="Ex: VOCÊ APOIA NOSSO PROJETO?"
+              />
+            </Form.Item>
+          )}
+
+          <Form.Item
+            name="descricao"
+            label="DESCRIÇÃO / MENSAGEM"
+            rules={[{ required: true, whitespace: true, message: 'Informe a mensagem' }]}
+            extra={
+              <div style={{ fontSize: 10, color: '#666' }}>
+                Dica: Use <strong>(NOME)</strong> ou <strong>{'{NOME}'}</strong> para substituir pelo nome do contato.<br/>
+                Certifique-se que seu arquivo contém uma coluna chamada "Nome", "Name", "Cliente" ou "Full Name".
+              </div>
+            }
+          >
             <Input.TextArea rows={4} placeholder="Texto da mensagem que será enviada" />
           </Form.Item>
 
@@ -379,16 +433,30 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
           </Space>
 
           <Form.Item label="IMAGEM DA MENSAGEM">
-               <Upload
-                  listType="picture-card"
-                  maxCount={1}
-                  fileList={imagemList}
-                  onChange={({ fileList }) => setImagemList(fileList)}
-                  beforeUpload={() => false}
-                  accept="image/*"
-               >
-                  {imagemList.length < 1 && <div><CloudUploadOutlined /><div style={{ marginTop: 8 }}>Upload</div></div>}
-               </Upload>
+               <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+                   <Upload
+                      listType="picture-card"
+                      maxCount={1}
+                      fileList={imagemList}
+                      onChange={({ fileList }) => setImagemList(fileList)}
+                      beforeUpload={() => false}
+                      accept="image/*"
+                   >
+                      {imagemList.length < 1 && <div><CloudUploadOutlined /><div style={{ marginTop: 8 }}>Upload</div></div>}
+                   </Upload>
+                   
+                   {imagemList.length > 0 && (
+                       <Form.Item label="POSIÇÃO DO TEXTO EM RELAÇÃO À IMAGEM" style={{ marginBottom: 0 }}>
+                           <Radio.Group value={posicaoImagem} onChange={e => setPosicaoImagem(e.target.value)}>
+                               <Radio.Button value="top">TEXTO ANTES (MENSAGEM SEPARADA)</Radio.Button>
+                               <Radio.Button value="bottom">TEXTO DEPOIS (LEGENDA)</Radio.Button>
+                           </Radio.Group>
+                           <div style={{ fontSize: 10, color: '#999', marginTop: 4 }}>
+                               {posicaoImagem === 'top' ? 'Envia texto primeiro, depois imagem.' : 'Envia imagem com o texto como legenda.'}
+                           </div>
+                       </Form.Item>
+                   )}
+               </div>
           </Form.Item>
         </Card>
 
@@ -421,19 +489,10 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
 
         <Space style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
           <Button onClick={onCancel} icon={<CloseCircleOutlined />}>CANCELAR</Button>
-          <Tooltip title={!initial?.id ? "Salve a campanha antes de enviar" : (!canSend ? "Fora do período de vigência" : "Iniciar automação")}>
-              <Button 
-                onClick={handleEnviarCampanha} 
-                disabled={!canSend}
-                icon={<SendOutlined />}
-                style={{ background: canSend ? '#52c41a' : undefined, color: canSend ? '#fff' : undefined, borderColor: canSend ? '#52c41a' : undefined }}
-              >
-                ENVIAR CAMPANHA
-              </Button>
-          </Tooltip>
           <Button type="primary" onClick={handleOk} icon={<SaveOutlined />}>SALVAR</Button>
         </Space>
       </Form>
     </Modal>
+    </>
   )
 }

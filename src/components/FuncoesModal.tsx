@@ -1,4 +1,4 @@
-import { Modal, Form, Input, Button, Space, message, Switch, Select } from 'antd'
+import { Modal, Form, Input, Button, Space, Switch, Select, App } from 'antd'
 import { useEffect, useState } from 'react'
 import { useApi } from '../context/ApiContext'
 
@@ -13,6 +13,7 @@ export default function FuncoesModal({ open, initial, onCancel, onSaved }: Props
   const [form] = Form.useForm()
   const api = useApi()
   const [perfis, setPerfis] = useState<any[]>([])
+  const { message } = App.useApp()
 
   useEffect(() => {
     if (open) {

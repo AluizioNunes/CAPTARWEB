@@ -15,13 +15,18 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     server: {
-      port: 5500,
+      port: 5173,
       host: '0.0.0.0',
       strictPort: false,
       open: false,
       cors: true,
       proxy: {
         '/api': {
+          target: proxyTarget,
+          changeOrigin: true,
+          secure: false
+        },
+        '/static': {
           target: proxyTarget,
           changeOrigin: true,
           secure: false

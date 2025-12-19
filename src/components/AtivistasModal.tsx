@@ -1,4 +1,4 @@
-import { Modal, Form, Input, Button, message, Select, Avatar, Card, Space } from 'antd'
+import { Modal, Form, Input, Button, Select, Avatar, Card, Space, App } from 'antd'
 import { UserOutlined, TeamOutlined, SaveOutlined, CloseCircleOutlined } from '@ant-design/icons'
 import { useEffect, useMemo, useState } from 'react'
 import { useApi } from '../context/ApiContext'
@@ -20,6 +20,7 @@ export default function AtivistasModal({ open, initial, onCancel, onSaved }: Pro
   const [tenantOptions, setTenantOptions] = useState<{ value: string; label: string; slug?: string }[]>([])
   const api = useApi()
   const { user } = useAuthStore()
+  const { message } = App.useApp()
 
   // Header Logic
   const loginDateObj = useMemo(() => {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Card, Row, Col, Typography, Button, Space, Tag, Table, App, Select } from 'antd'
-import { ThunderboltOutlined, ReloadOutlined, SendOutlined } from '@ant-design/icons'
+import { ThunderboltOutlined, ReloadOutlined } from '@ant-design/icons'
 import { motion } from 'framer-motion'
 import { useApi } from '../../context/ApiContext'
 
@@ -146,7 +146,6 @@ export default function Disparos() {
                   onChange={(v) => setCampanhaId(Number(v))}
                 />
                 <Button icon={<ReloadOutlined />} onClick={() => loadGrid()}>Atualizar</Button>
-                <Button type="primary" icon={<SendOutlined />}>Novo Disparo</Button>
               </Space>
             </Space>
           </Card>

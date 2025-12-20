@@ -309,16 +309,9 @@ CREATE TABLE IF NOT EXISTS captar.logs_sistema (
     CONSTRAINT fk_log_usuario FOREIGN KEY (usuario_id) REFERENCES captar.usuarios(id) ON DELETE SET NULL
 );
 
-CREATE TABLE IF NOT EXISTS captar."EvolutionAPI" (
-    "IdEvolutionAPI" SERIAL PRIMARY KEY,
-    "Nome" VARCHAR(150) NOT NULL,
-    "InstanceName" VARCHAR(150) NOT NULL,
-    "ApiKey" TEXT NOT NULL,
-    "BaseUrl" TEXT NOT NULL,
-    "Ativo" BOOLEAN DEFAULT TRUE,
-    "Padrao" BOOLEAN DEFAULT FALSE,
-    "CriadoEm" TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    "AtualizadoEm" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE IF NOT EXISTS captar."EvolutionAPIFallback" (
+    chave VARCHAR(255) PRIMARY KEY,
+    valor TEXT
 );
 
 -- Inserir permissões padrão

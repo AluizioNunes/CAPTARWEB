@@ -10,7 +10,11 @@ from fastapi.responses import FileResponse, Response
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 import os
 from dotenv import load_dotenv
 import redis
@@ -43,6 +47,19 @@ import uuid
 import unicodedata
 
 load_dotenv()
+
+try:
+    _MANAUS_TZ = ZoneInfo("America/Manaus") if ZoneInfo else timezone(timedelta(hours=-4))
+except Exception:
+    _MANAUS_TZ = timezone(timedelta(hours=-4))
+
+def _attach_utc(dt: Any) -> Any:
+    try:
+        if isinstance(dt, datetime) and dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return dt
 
 # Database Configuration
 def _resolve_db_host() -> str:
@@ -431,27 +448,24 @@ def _get_evolution_base_url(conn) -> str:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT EXISTS (
-                SELECT 1
-                FROM information_schema.tables
-                WHERE table_schema = %s AND table_name = 'configuracoes'
-            )
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = %s AND lower(table_name) = lower(%s)
+            LIMIT 1
             """,
-            (DB_SCHEMA,),
+            (DB_SCHEMA, "EvolutionAPIFallback"),
         )
-        has_cfg = bool(cur.fetchone()[0])
-        if has_cfg:
+        row = cur.fetchone()
+        if row and row[0]:
+            safe_schema = str(DB_SCHEMA).replace('"', '""')
+            safe_table = str(row[0]).replace('"', '""')
             cur.execute(
-                f"""
-                SELECT valor
-                FROM "{DB_SCHEMA}".configuracoes
-                WHERE chave = 'WHATSAPP_API_URL'
-                LIMIT 1
-                """
+                f'SELECT valor FROM "{safe_schema}"."{safe_table}" WHERE chave=%s LIMIT 1',
+                ("WHATSAPP_API_URL",),
             )
-            row = cur.fetchone()
-            if row and row[0]:
-                return str(row[0]).strip().rstrip("/")
+            row2 = cur.fetchone()
+            if row2 and row2[0]:
+                return str(row2[0]).strip().rstrip("/")
     except Exception:
         pass
     return "http://evolution_api:4000"
@@ -683,7 +697,7 @@ async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
                                         f"""
                                         INSERT INTO "{DB_SCHEMA}"."Disparos"
                                         ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload")
-                                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),%s::jsonb)
+                                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW() AT TIME ZONE 'UTC',%s::jsonb)
                                         """,
                                         (
                                             tid_log,
@@ -729,7 +743,7 @@ async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
                                         f"""
                                         INSERT INTO "{DB_SCHEMA}"."Disparos"
                                         ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload")
-                                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),%s::jsonb)
+                                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW() AT TIME ZONE 'UTC',%s::jsonb)
                                         """,
                                         (
                                             tid_log,
@@ -772,7 +786,7 @@ async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
                                     f"""
                                     INSERT INTO "{DB_SCHEMA}"."Disparos"
                                     ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload")
-                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),%s::jsonb)
+                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW() AT TIME ZONE 'UTC',%s::jsonb)
                                     """,
                                     (
                                         tid_log,
@@ -809,7 +823,7 @@ async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
                     f"""
                     INSERT INTO "{DB_SCHEMA}"."Disparos"
                     ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload")
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),%s::jsonb)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW() AT TIME ZONE 'UTC',%s::jsonb)
                     """,
                     (
                         tid_log,
@@ -839,7 +853,7 @@ async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
                     f"""
                     INSERT INTO "{DB_SCHEMA}"."Disparos"
                     ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload")
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),%s::jsonb)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW() AT TIME ZONE 'UTC',%s::jsonb)
                     """,
                     (
                         tid_log,
@@ -889,6 +903,8 @@ def _format_dt_br(v: Any) -> str:
         if v is None:
             return ''
         if isinstance(v, datetime):
+            if v.tzinfo is not None:
+                return v.astimezone(_MANAUS_TZ).strftime('%d/%m/%Y %H:%M:%S')
             return v.strftime('%d/%m/%Y %H:%M:%S')
         if isinstance(v, date):
             return v.strftime('%d/%m/%Y')
@@ -897,6 +913,8 @@ def _format_dt_br(v: Any) -> str:
             return ''
         try:
             dt = datetime.fromisoformat(s.replace('Z', '+00:00'))
+            if dt.tzinfo is not None:
+                return dt.astimezone(_MANAUS_TZ).strftime('%d/%m/%Y %H:%M:%S')
             return dt.strftime('%d/%m/%Y %H:%M:%S')
         except Exception:
             return s
@@ -1089,6 +1107,8 @@ def _campanha_disparos_grid(
         raise HTTPException(status_code=404, detail="Campanha não encontrada")
     cols_c = [d[0] for d in cursor.description]
     campanha_obj = dict(zip(cols_c, campanha_row))
+    for k, v in list(campanha_obj.items()):
+        campanha_obj[k] = _attach_utc(v)
 
     anexo_obj = _safe_json_obj(campanha_obj.get('anexo_json'))
     pergunta = _anexo_question(anexo_obj) or str(campanha_obj.get('descricao') or '').strip()
@@ -1230,6 +1250,8 @@ def _campanha_disparos_grid(
             ent['resposta_classificacao'] = 'AGUARDANDO'
         if not ent.get('resposta_texto'):
             ent['resposta_texto'] = '—'
+        for k, v in list(ent.items()):
+            ent[k] = _attach_utc(v)
         linhas.append(ent)
     linhas.sort(key=lambda x: (str(x.get('nome') or ''), str(x.get('numero') or '')))
 
@@ -1322,9 +1344,13 @@ def _build_comprovante_pdf_bytes(
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
         from reportlab.lib import colors
-        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_JUSTIFY
         from reportlab.lib.units import mm
         from reportlab.lib.utils import ImageReader
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.pdfgen import canvas as rl_canvas
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Dependência ausente para PDF: {e}")
 
@@ -1334,66 +1360,254 @@ def _build_comprovante_pdf_bytes(
         pagesize = landscape(A4)
     else:
         pagesize = A4
+
+    def _pick_fonts() -> Tuple[str, str]:
+        base = 'Helvetica'
+        bold = 'Helvetica-Bold'
+        candidates = [
+            ('Arial', 'Arial-Bold', ['arial.ttf', 'Arial.ttf'], ['arialbd.ttf', 'Arial Bold.ttf', 'ArialBD.ttf', 'Arialbd.ttf']),
+        ]
+        search_dirs = [
+            '/usr/share/fonts',
+            '/usr/local/share/fonts',
+            '/usr/share/fonts/truetype',
+            '/usr/share/fonts/truetype/msttcorefonts',
+            '/usr/share/fonts/truetype/msttcorefonts-installer',
+            '/usr/share/fonts/truetype/liberation',
+            '/usr/share/fonts/truetype/dejavu',
+        ]
+
+        def find_file(names: List[str]) -> Optional[str]:
+            for d in search_dirs:
+                try:
+                    if not os.path.isdir(d):
+                        continue
+                    for root, _, files in os.walk(d):
+                        fl = {f.lower(): f for f in files}
+                        for n in names:
+                            hit = fl.get(str(n).lower())
+                            if hit:
+                                return os.path.join(root, hit)
+                except Exception:
+                    continue
+            return None
+
+        for base_name, bold_name, base_files, bold_files in candidates:
+            try:
+                base_path = find_file(base_files)
+                if not base_path:
+                    continue
+                try:
+                    pdfmetrics.registerFont(TTFont(base_name, base_path))
+                except Exception:
+                    continue
+                base = base_name
+
+                bold_path = find_file(bold_files)
+                if bold_path:
+                    try:
+                        pdfmetrics.registerFont(TTFont(bold_name, bold_path))
+                        bold = bold_name
+                    except Exception:
+                        bold = base_name
+                else:
+                    bold = base_name
+                break
+            except Exception:
+                continue
+        return base, bold
+
+    font_base, font_bold = _pick_fonts()
+    generated_dt = datetime.now(_MANAUS_TZ) if _MANAUS_TZ else datetime.now()
+    generated_str = _format_dt_br(generated_dt)
+
     doc = SimpleDocTemplate(
         buffer,
         pagesize=pagesize,
-        leftMargin=18 * mm,
-        rightMargin=18 * mm,
-        topMargin=26 * mm,
-        bottomMargin=18 * mm,
+        leftMargin=8 * mm,
+        rightMargin=8 * mm,
+        topMargin=30 * mm,
+        bottomMargin=14 * mm,
         title=titulo,
     )
     styles = getSampleStyleSheet()
-    style_title = styles['Title']
-    style_normal = styles['BodyText']
-    style_normal.leading = 12
+    style_normal = ParagraphStyle(
+        'CAPTAR_Normal',
+        parent=styles['Normal'],
+        fontName=font_base,
+        fontSize=9,
+        leading=11,
+        spaceBefore=0,
+        spaceAfter=0,
+    )
+    style_label = ParagraphStyle(
+        'CAPTAR_Label',
+        parent=styles['Normal'],
+        fontName=font_bold,
+        fontSize=9,
+        leading=11,
+        spaceBefore=0,
+        spaceAfter=0,
+    )
+    style_small = ParagraphStyle(
+        'CAPTAR_Small',
+        parent=styles['Normal'],
+        fontName=font_base,
+        fontSize=8,
+        leading=10,
+        spaceBefore=0,
+        spaceAfter=0,
+    )
+    style_justify = ParagraphStyle(
+        'CAPTAR_Justify',
+        parent=styles['Normal'],
+        fontName=font_base,
+        fontSize=9,
+        leading=11,
+        alignment=TA_JUSTIFY,
+        spaceBefore=0,
+        spaceAfter=0,
+    )
+
+    nome = campanha.get('nome') or ''
+    criado_em = _format_dt_br(campanha.get('criado_em') or '')
+    campanha_txt = f'{nome} (#{campanha.get("id")})'
+
+    pergunta_hdr = re.sub(r'\s+', ' ', str(_truncate_text(pergunta, 900) if pergunta else '')).strip()
+    totals_txt = (
+        f'Enviados={int(stats.get("enviados", 0) or 0)} '
+        f'Falhas={int(stats.get("falhas", 0) or 0)} '
+        f'Respostas={int(stats.get("respostas", 0) or 0)} '
+        f'Positivos={int(stats.get("positivos", 0) or 0)} '
+        f'Negativos={int(stats.get("negativos", 0) or 0)} '
+        f'Aguardando={int(stats.get("aguardando", 0) or 0)}'
+    )
+
+    def _truncate_to_width(s: Any, font_name: str, font_size: float, max_w: float) -> str:
+        raw = re.sub(r'\s+', ' ', str(s or '')).strip()
+        if not raw:
+            return ''
+        try:
+            if pdfmetrics.stringWidth(raw, font_name, font_size) <= max_w:
+                return raw
+            ell = '...'
+            ell_w = pdfmetrics.stringWidth(ell, font_name, font_size)
+            if ell_w >= max_w:
+                return ell
+            lo, hi = 0, len(raw)
+            while lo < hi:
+                mid = (lo + hi) // 2
+                cand = raw[:mid].rstrip() + ell
+                if pdfmetrics.stringWidth(cand, font_name, font_size) <= max_w:
+                    lo = mid + 1
+                else:
+                    hi = mid
+            cut = max(0, lo - 1)
+            return raw[:cut].rstrip() + ell
+        except Exception:
+            return raw[: max(0, int(len(raw) * 0.6))].rstrip() + '...'
 
     def draw_header(canvas, doc_obj):
         w, h = doc_obj.pagesize
         canvas.saveState()
+        header_top = h - (6 * mm)
+        logo_w = 52 * mm
+        logo_h = 16 * mm
+        logo_x = doc.leftMargin
+        logo_y = header_top - logo_h
         logo_path = _find_captar_logo_path()
         if logo_path:
             try:
                 img = ImageReader(logo_path)
-                canvas.drawImage(img, doc.leftMargin, h - 18 * mm, width=38 * mm, height=12 * mm, preserveAspectRatio=True, mask='auto')
+                canvas.drawImage(
+                    img,
+                    logo_x,
+                    logo_y,
+                    width=logo_w,
+                    height=logo_h,
+                    preserveAspectRatio=True,
+                    mask='auto',
+                )
             except Exception:
                 pass
-        canvas.setFont('Helvetica-Bold', 12)
-        canvas.drawString(doc.leftMargin + 42 * mm, h - 14 * mm, 'CAPTAR')
-        canvas.setFont('Helvetica', 9)
-        canvas.drawRightString(w - doc.rightMargin, h - 14 * mm, f'Gerado em: {_format_dt_br(datetime.now())}')
+        title_txt = 'RELATÓRIO DE CAMPANHA'
+        title_size = 12
+        canvas.setFont(font_bold, title_size)
+        canvas.drawRightString(w - doc.rightMargin, header_top - (4 * mm), title_txt)
+        right_edge = float(w - doc.rightMargin)
+
+        info_x = logo_x + logo_w + (4 * mm)
+        label_size = 8
+        value_size = 8
+        label_col_w = 24 * mm
+        value_x = info_x + label_col_w
+
+        y_campaign = header_top - (6 * mm)
+        y_created = header_top - (10 * mm)
+        y_msg = header_top - (14 * mm)
+        y_status = header_top - (18 * mm)
+
+        max_val_w = max(10 * mm, right_edge - float(value_x))
+
+        canvas.setFont(font_bold, label_size)
+        canvas.drawString(info_x, y_campaign, 'CAMPANHA:')
+        canvas.setFont(font_base, value_size)
+        canvas.drawString(value_x, y_campaign, _truncate_to_width(campanha_txt or '—', font_base, value_size, max_val_w))
+
+        canvas.setFont(font_bold, label_size)
+        canvas.drawString(info_x, y_created, 'CRIADO EM:')
+        canvas.setFont(font_base, value_size)
+        canvas.drawString(value_x, y_created, _truncate_to_width((criado_em or '—'), font_base, value_size, max_val_w))
+
+        canvas.setFont(font_bold, label_size)
+        canvas.drawString(info_x, y_msg, 'MENSAGEM:')
+        canvas.setFont(font_base, value_size)
+        canvas.drawString(value_x, y_msg, _truncate_to_width((pergunta_hdr or '—'), font_base, value_size, max_val_w))
+
+        canvas.setFont(font_bold, label_size)
+        canvas.drawString(info_x, y_status, 'STATUS FINAL:')
+        canvas.setFont(font_base, value_size)
+        canvas.drawString(value_x, y_status, _truncate_to_width((totals_txt or '—'), font_base, value_size, max_val_w))
+
         canvas.setStrokeColor(colors.lightgrey)
-        canvas.line(doc.leftMargin, h - 18.5 * mm, w - doc.rightMargin, h - 18.5 * mm)
+        canvas.line(doc.leftMargin, header_top - (22 * mm), w - doc.rightMargin, header_top - (22 * mm))
         canvas.restoreState()
 
+    left_m = float(doc.leftMargin)
+    right_m = float(doc.rightMargin)
+
+    class _NumberedCanvas(rl_canvas.Canvas):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._saved_page_states: List[dict] = []
+
+        def showPage(self):
+            self._saved_page_states.append(dict(self.__dict__))
+            self._startPage()
+
+        def save(self):
+            page_count = len(self._saved_page_states)
+            for state in self._saved_page_states:
+                self.__dict__.update(state)
+                self._draw_footer(page_count)
+                rl_canvas.Canvas.showPage(self)
+            rl_canvas.Canvas.save(self)
+
+        def _draw_footer(self, page_count: int):
+            w, _h = self._pagesize
+            y_line = 12 * mm
+            y_text = 7.5 * mm
+            self.saveState()
+            self.setStrokeColor(colors.lightgrey)
+            self.setLineWidth(0.5)
+            self.line(left_m, y_line, w - right_m, y_line)
+            self.setFont(font_base, 8)
+            self.drawString(left_m, y_text, f'Gerado em: {generated_str}')
+            self.drawRightString(w - right_m, y_text, f'PÁGINA - {int(self._pageNumber):02d}/{int(page_count):02d}')
+            self.restoreState()
+
     elements: List[Any] = []
-    elements.append(Paragraph(titulo, style_title))
-    elements.append(Spacer(1, 6))
-
-    nome = campanha.get('nome') or ''
-    periodo_ini = _format_dt_br(campanha.get('data_inicio') or '')
-    periodo_fim = _format_dt_br(campanha.get('data_fim') or '')
-    criado_em = _format_dt_br(campanha.get('criado_em') or '')
-    cadastrante = str(campanha.get('cadastrante') or '')
-
-    elements.append(Paragraph(f"<b>Campanha:</b> {nome} (#{campanha.get('id')})", style_normal))
-    if criado_em:
-        elements.append(Paragraph(f"<b>Data de criação:</b> {criado_em}", style_normal))
-    if periodo_ini or periodo_fim:
-        elements.append(Paragraph(f"<b>Período:</b> {periodo_ini or '—'} até {periodo_fim or '—'}", style_normal))
-    if cadastrante:
-        elements.append(Paragraph(f"<b>Cadastrante:</b> {cadastrante}", style_normal))
-    if pergunta:
-        elements.append(Spacer(1, 4))
-        elements.append(Paragraph(f"<b>Pergunta / Mensagem enviada:</b> {_truncate_text(pergunta, 350)}", style_normal))
-
-    elements.append(Spacer(1, 6))
-    elements.append(Paragraph(
-        f"<b>Totais:</b> Enviados={int(stats.get('enviados', 0) or 0)} | Falhas={int(stats.get('falhas', 0) or 0)} | Respostas={int(stats.get('respostas', 0) or 0)}"
-        f" | Positivos={int(stats.get('positivos', 0) or 0)} | Negativos={int(stats.get('negativos', 0) or 0)} | Aguardando={int(stats.get('aguardando', 0) or 0)}",
-        style_normal
-    ))
-    elements.append(Spacer(1, 10))
+    elements.append(Spacer(1, 2))
 
     header = [
         'NOME',
@@ -1402,7 +1616,6 @@ def _build_comprovante_pdf_bytes(
         'STATUS ENVIO',
         'RESPOSTA',
         'RESPOSTA (DATA/HORA)',
-        'TEXTO RESPOSTA',
     ]
     data_rows: List[List[Any]] = [header]
     for it in linhas:
@@ -1413,37 +1626,39 @@ def _build_comprovante_pdf_bytes(
             Paragraph(str(it.get('envio_status') or '—').upper(), style_normal),
             Paragraph(str(it.get('resposta_classificacao') or '—').upper(), style_normal),
             Paragraph(_format_dt_br(it.get('resposta_datahora') or ''), style_normal),
-            Paragraph(_truncate_text(it.get('resposta_texto') or '', 80) or '—', style_normal),
         ])
 
-    base_col_widths = [44 * mm, 27 * mm, 30 * mm, 23 * mm, 18 * mm, 30 * mm, 34 * mm]
-    total_w = float(sum(base_col_widths))
-    avail_w = float(getattr(doc, 'width', total_w))
-    if total_w > 0 and avail_w > 0 and total_w > avail_w:
-        factor = avail_w / total_w
-        col_widths = [w * factor for w in base_col_widths]
-    else:
-        col_widths = base_col_widths
+    avail_w = float(getattr(doc, 'width', 0.0) or 0.0)
+    col_widths = [
+        avail_w * 0.26,
+        avail_w * 0.16,
+        avail_w * 0.17,
+        avail_w * 0.11,
+        avail_w * 0.11,
+        avail_w * 0.19,
+    ]
     table = Table(data_rows, colWidths=col_widths, repeatRows=1)
     table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1f2937')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTNAME', (0, 0), (-1, 0), font_bold),
         ('FONTSIZE', (0, 0), (-1, 0), 9),
-        ('ALIGN', (1, 1), (1, -1), 'LEFT'),
-        ('ALIGN', (2, 1), (5, -1), 'CENTER'),
+        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+        ('ALIGN', (0, 1), (0, -1), 'LEFT'),
+        ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('GRID', (0, 0), (-1, -1), 0.25, colors.lightgrey),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f3f4f6')]),
-        ('FONTSIZE', (0, 1), (-1, -1), 8),
-        ('LEFTPADDING', (0, 0), (-1, -1), 4),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-        ('TOPPADDING', (0, 0), (-1, -1), 3),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ('FONTNAME', (0, 1), (-1, -1), font_base),
+        ('FONTSIZE', (0, 1), (-1, -1), 9),
+        ('LEFTPADDING', (0, 0), (-1, -1), 2),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 2),
+        ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
     ]))
     elements.append(table)
 
-    doc.build(elements, onFirstPage=draw_header, onLaterPages=draw_header)
+    doc.build(elements, onFirstPage=draw_header, onLaterPages=draw_header, canvasmaker=_NumberedCanvas)
     return buffer.getvalue()
 
 def _strip_accents(s: str) -> str:
@@ -1995,7 +2210,13 @@ async def disparos_list(limit: int = 1000, campanha_id: Optional[int] = None, nu
             )
             rows = cursor.fetchall()
             cols = [d[0] for d in cursor.description]
-            return {"rows": [dict(zip(cols, r)) for r in rows], "columns": cols}
+            out_rows: List[Dict[str, Any]] = []
+            for r in rows or []:
+                d = dict(zip(cols, r))
+                for k, v in list(d.items()):
+                    d[k] = _attach_utc(v)
+                out_rows.append(d)
+            return {"rows": out_rows, "columns": cols}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2046,7 +2267,13 @@ async def relatorios_list(limit: int = 200, campanha_id: Optional[int] = None, r
             )
             rows = cursor.fetchall()
             cols = [d[0] for d in cursor.description]
-            return {"rows": [dict(zip(cols, r)) for r in rows], "columns": cols}
+            out_rows: List[Dict[str, Any]] = []
+            for r in rows or []:
+                d = dict(zip(cols, r))
+                for k, v in list(d.items()):
+                    d[k] = _attach_utc(v)
+                out_rows.append(d)
+            return {"rows": out_rows, "columns": cols}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2075,7 +2302,10 @@ async def relatorios_get(id: int, request: Request):
             if not row:
                 raise HTTPException(status_code=404, detail="Relatório não encontrado")
             cols = [d[0] for d in cursor.description]
-            return dict(zip(cols, row))
+            d = dict(zip(cols, row))
+            for k, v in list(d.items()):
+                d[k] = _attach_utc(v)
+            return d
     except HTTPException:
         raise
     except Exception as e:
@@ -2163,7 +2393,7 @@ async def relatorios_comprovante(body: RelatorioComprovanteRequest, request: Req
                 f"""
                 INSERT INTO "{DB_SCHEMA}"."Relatorios"
                 ("IdTenant","IdCampanha","Titulo","Tipo","Parametros","Dados","CriadoEm","CriadoPor")
-                VALUES (%s,%s,%s,%s,%s::jsonb,%s::jsonb,NOW(),%s)
+                VALUES (%s,%s,%s,%s,%s::jsonb,%s::jsonb,NOW() AT TIME ZONE 'UTC',%s)
                 RETURNING "IdRelatorio"
                 """,
                 (

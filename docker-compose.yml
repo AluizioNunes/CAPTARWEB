@@ -9,11 +9,14 @@ services:
       - "com.captar.stack=captar"
     env_file:
       - .env
+    environment:
+      - TZ=${TZ}
     ports:
       - "5440:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    command: ["postgres", "-c", "timezone=${TZ}"]
     networks:
       - captar-network
     healthcheck:
@@ -39,6 +42,7 @@ services:
       - DB_HOST=postgres
       - REDIS_HOST=redis
       - MONGO_HOST=mongodb
+      - TZ=${TZ}
     volumes:
       - ./Backend/FastAPI/static:/app/static
       - ./src/images:/app/src/images:ro

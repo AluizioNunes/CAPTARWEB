@@ -14,3 +14,4 @@ aiohttp-cors
 redis
 cryptography
 psycopg-pool
+reportlab

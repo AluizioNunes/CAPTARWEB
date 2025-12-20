@@ -21,6 +21,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 
 const Disparos = lazy(() => import('./pages/Automacao/Disparos'))
 const Campanha = lazy(() => import('./pages/Automacao/Campanha'))
+const Relatorios = lazy(() => import('./pages/Automacao/Relatorios'))
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const Estatisticas = lazy(() => import('./pages/Estatisticas'))
 const Tenants = lazy(() => import('./pages/Tenants'))
@@ -63,6 +64,11 @@ function AppRoutes() {
           <Route path="/automacao/campanha" element={isAuthenticated ? (
             <Suspense fallback={<div style={{ padding: 24 }}>Carregando...</div>}>
               <Campanha />
+            </Suspense>
+          ) : <Navigate to="/login" />} />
+          <Route path="/automacao/relatorios" element={isAuthenticated ? (
+            <Suspense fallback={<div style={{ padding: 24 }}>Carregando...</div>}>
+              <Relatorios />
             </Suspense>
           ) : <Navigate to="/login" />} />
           <Route path="/integracoes" element={isAuthenticated ? <Integracoes /> : <Navigate to="/login" />} />

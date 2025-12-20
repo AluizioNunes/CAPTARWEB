@@ -117,6 +117,7 @@ function Navbar() {
       children: [
         { key: '/automacao/campanha', icon: <FileTextOutlined />, label: 'CAMPANHA', onClick: () => navigate('/automacao/campanha') },
         { key: '/automacao/disparos', icon: <ApiOutlined />, label: 'DISPAROS', onClick: () => navigate('/automacao/disparos') },
+        { key: '/automacao/relatorios', icon: <FileTextOutlined />, label: 'RELATÓRIOS', onClick: () => navigate('/automacao/relatorios') },
       ],
     },
     {

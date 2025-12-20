@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion'
-import { useEffect, useState, useMemo } from 'react'
-import { Table, Button, Space, Dropdown, Checkbox, Tag, Card, Statistic, Image, List, Row, Col, Tooltip, App } from 'antd'
+import { useEffect, useState, useMemo, useCallback } from 'react'
+import { Table, Button, Space, Dropdown, Checkbox, Tag, Card, Statistic, Image, List, Row, Col, Tooltip, App, Select } from 'antd'
 import { TeamOutlined, CheckCircleOutlined, ExclamationCircleOutlined, SyncOutlined, SendOutlined, PictureOutlined, WhatsAppOutlined, CheckCircleFilled, CloseCircleFilled, ClockCircleFilled, RightOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useAuthStore } from '../../store/authStore'
 import { useApi } from '../../context/ApiContext'
@@ -20,6 +20,8 @@ export default function Campanha() {
   // New states for the enriched view
   const [eventLogs, setEventLogs] = useState<string[]>([])
   const [contactStatuses, setContactStatuses] = useState<any[]>([])
+  const [evolutionInstances, setEvolutionInstances] = useState<any[]>([])
+  const [selectedEvolutionInstanceId, setSelectedEvolutionInstanceId] = useState<string | 'ALL' | null>(null)
 
   const api = useApi()
   const { user } = useAuthStore()
@@ -49,6 +51,61 @@ export default function Campanha() {
       return data.find(r => r.id === selectedRowKeys[0])
   }, [selectedRowKeys, data])
 
+  const selectedCampanhaConfig = useMemo(() => {
+    const raw = selectedCampanha?.conteudo_arquivo
+    if (!raw) return {}
+    try {
+      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const cfg = (parsed as any).config
+        if (cfg && typeof cfg === 'object') return cfg
+      }
+    } catch {}
+    return {}
+  }, [selectedCampanha?.id, selectedCampanha?.conteudo_arquivo])
+
+  const loadEvolutionInstances = useCallback(async () => {
+    try {
+      const res = await api.listEvolutionInstances()
+      setEvolutionInstances(res?.rows || [])
+    } catch {
+      setEvolutionInstances([])
+    }
+  }, [api])
+
+  useEffect(() => {
+    loadEvolutionInstances()
+  }, [loadEvolutionInstances])
+
+  const availableEvolutionInstances = useMemo(() => {
+    const cfg = selectedCampanhaConfig || {}
+    const rawIds = (cfg as any).evolution_api_ids ?? (cfg as any).evolution_api_id
+    const allowedIds = (Array.isArray(rawIds) ? rawIds : (rawIds !== undefined && rawIds !== null ? [rawIds] : []))
+      .map((x: any) => String(x ?? '').trim())
+      .filter((s: any) => !!s)
+    const all = evolutionInstances || []
+    if (!allowedIds.length) return all
+    const setAllowed = new Set(allowedIds)
+    const filtered = all.filter((x: any) => setAllowed.has(String(x?.id ?? '').trim()))
+    return filtered.length ? filtered : all
+  }, [evolutionInstances, selectedCampanhaConfig])
+
+  useEffect(() => {
+    if (!selectedCampanha) {
+      setSelectedEvolutionInstanceId(null)
+      return
+    }
+    if (!availableEvolutionInstances.length) {
+      setSelectedEvolutionInstanceId(null)
+      return
+    }
+    const cur = selectedEvolutionInstanceId
+    if (cur === 'ALL') return
+    if (typeof cur === 'string' && availableEvolutionInstances.some((x: any) => String(x?.id ?? '').trim() === cur)) return
+    const connected = availableEvolutionInstances.find((x: any) => String(x?.connectionStatus || '').toUpperCase() === 'CONNECTED')
+    setSelectedEvolutionInstanceId(String((connected || availableEvolutionInstances[0])?.id ?? '').trim() || null)
+  }, [availableEvolutionInstances, selectedCampanha?.id, selectedEvolutionInstanceId, selectedCampanha])
+
   // Handle selection change and load real data
   useEffect(() => {
     if (selectedCampanha) {
@@ -56,7 +113,6 @@ export default function Campanha() {
         setEventLogs([`[${dayjs().format('HH:mm:ss')}] Sistema pronto. Aguardando início do disparo.`])
         
         let contacts: any[] = []
-        let config: any = {}
 
         const parseResposta = (v: any) => {
             const s = String(v ?? '').trim()
@@ -89,7 +145,6 @@ export default function Campanha() {
                 } else if (parsed.contacts && Array.isArray(parsed.contacts)) {
                     // New Format
                     contacts = parsed.contacts
-                    config = parsed.config || {}
                 }
 
                 if (contacts.length > 0) {
@@ -130,11 +185,6 @@ export default function Campanha() {
         }
 
         setContactStatuses(contacts);
-        // Store config in state if needed, or derived from selectedCampanha in render/send
-        // We'll attach it to selectedCampanha temporarily or just use it in handleEnviarCampanha if we re-parse
-        // Better to re-parse in handleEnviarCampanha to be safe or use Memo.
-        // But for now, let's assume selectedCampanha.config_override = config
-        (selectedCampanha as any)._config = config
     } else {
         setEventLogs([])
         setContactStatuses([])
@@ -153,6 +203,12 @@ export default function Campanha() {
       
       return now.isAfter(sDate.startOf('day')) && now.isBefore(eDate.endOf('day')) || now.isSame(sDate, 'day') || now.isSame(eDate, 'day')
   }, [selectedCampanha])
+
+  const aguardarRespostasAtivo = useMemo(() => {
+      if (!selectedCampanha) return false
+      const cfg = selectedCampanhaConfig || {}
+      return String(cfg.response_mode || '').toUpperCase() === 'SIM_NAO'
+  }, [selectedCampanha, selectedCampanhaConfig])
 
   const handleResetarCampanha = () => {
       if (!selectedCampanha) return
@@ -173,6 +229,8 @@ export default function Campanha() {
                         delete original.response
                         delete original.respondido_em
                         delete original.respondidoEm
+                        delete original.enviado_em
+                        delete original.enviadoEm
                       }
                       return {
                         ...c,
@@ -238,7 +296,7 @@ export default function Campanha() {
       if (!selectedCampanha) return
       message.loading({ content: 'Atualizando...', key: 'refresh' })
       try {
-          await load()
+          await load({ refreshSchema: true })
           message.success({ content: 'Atualizado!', key: 'refresh' })
       } catch {
           message.error({ content: 'Erro ao atualizar', key: 'refresh' })
@@ -270,6 +328,18 @@ export default function Campanha() {
           // Prepare media payload once
           // If it starts with data:, it's base64. If http, it's URL. Otherwise, assume it's a filename that backend will resolve.
           const mediaPayload = selectedCampanha.imagem ? resolveImageSrc(selectedCampanha.imagem) : undefined
+          
+          const config = (() => {
+              return selectedCampanhaConfig || {}
+          })()
+          const aguardarRespostas = String(config.response_mode || '').toUpperCase() === 'SIM_NAO'
+          const evoIds = (() => {
+            const rawIds = (config as any).evolution_api_ids ?? (config as any).evolution_api_id
+            const arr = Array.isArray(rawIds) ? rawIds : (rawIds !== undefined && rawIds !== null ? [rawIds] : [])
+            return arr.map((x: any) => String(x ?? '').trim()).filter((s: any) => !!s)
+          })()
+          const computedAguardandoBase = Math.max(0, (selectedCampanha.enviados || 0) - ((selectedCampanha.positivos || 0) + (selectedCampanha.negativos || 0)))
+          const baseAguardando = aguardarRespostas ? (selectedCampanha.aguardando !== undefined && selectedCampanha.aguardando !== null ? Number(selectedCampanha.aguardando || 0) : computedAguardandoBase) : 0
 
           const recorrenciaAtiva = !!(selectedCampanha as any).recorrencia_ativa
           const totalBlocos = Number((selectedCampanha as any).total_blocos ?? 5)
@@ -292,6 +362,14 @@ export default function Campanha() {
           }
 
           let enviosNesteRun = 0
+          let dispatchIndex = 0
+
+          const rrPool = (() => {
+            if (selectedEvolutionInstanceId !== 'ALL') return []
+            const list = availableEvolutionInstances || []
+            const connected = list.filter((x: any) => String(x?.connectionStatus || '').toUpperCase() === 'CONNECTED')
+            return (connected.length ? connected : list).filter((x: any) => !!String(x?.id ?? '').trim())
+          })()
 
           // We iterate over the FULL list to maintain indices, but skip success
           for (let i = 0; i < localContacts.length; i++) {
@@ -301,6 +379,8 @@ export default function Campanha() {
               // Skip if already success
               if (contact.status === 'success') continue
               enviosNesteRun++
+              const attemptIndex = dispatchIndex
+              dispatchIndex++
               
               setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] Enviando mensagem para ${contact.nome} (${contact.whatsapp})...`])
               
@@ -318,13 +398,11 @@ export default function Campanha() {
                            .replace(/\(NAME\)/gi, nameToUse)
                            .replace(/\{NAME\}/gi, nameToUse)
 
-                  if (i === 0) {
+                  if (attemptIndex === 0) {
                       setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] DEBUG: Exemplo de mensagem resolvida: "${msg}"`])
                   }
 
-                  // Get config from selectedCampanha (attached in useEffect)
-                  const config = (selectedCampanha as any)._config || {}
-                  if (String(config.response_mode || '').toUpperCase() === 'SIM_NAO') {
+                  if (aguardarRespostas) {
                       const question = String(config.question || '').trim()
                       const parts = [msg.trim()]
                       if (question) parts.push(question)
@@ -334,14 +412,18 @@ export default function Campanha() {
                   let textPosition = config.text_position || 'bottom'
                   if (!msg.trim()) {
                       if (!mediaPayload) throw new Error('Mensagem vazia')
-                      if (textPosition === 'top') textPosition = 'bottom'
                   }
 
+                  const chosenEvoId =
+                    selectedEvolutionInstanceId === 'ALL'
+                      ? (rrPool.length ? String(rrPool[attemptIndex % rrPool.length]?.id ?? '').trim() : undefined)
+                      : (typeof selectedEvolutionInstanceId === 'string' ? selectedEvolutionInstanceId : (evoIds.length ? evoIds[attemptIndex % evoIds.length] : undefined))
                   await api.sendWhatsAppMessage(
                       String(contact.whatsapp), 
                       msg,
                       mediaPayload,
-                      textPosition
+                      textPosition,
+                      { campanha_id: selectedCampanha.id, contato_nome: contact.nome, evolution_api_id: chosenEvoId ?? undefined }
                   )
                   success = true
               } catch (err: any) {
@@ -351,13 +433,16 @@ export default function Campanha() {
               }
               
               // Update status in local array
-              localContacts[i] = { ...contact, status: success ? 'success' : 'error' }
+              const sentIso = success ? new Date().toISOString() : undefined
+              const nextOriginal = { ...(contact.original || {}) } as any
+              if (success && sentIso) nextOriginal.enviado_em = sentIso
+              localContacts[i] = { ...contact, status: success ? 'success' : 'error', original: nextOriginal }
               
               // Calculate deltas based on transition
               if (success) {
                   deltaEnviados++
-                  deltaAguardando++
                   if (prevStatus === 'error') deltaNaoEnviados--
+                  if (aguardarRespostas) deltaAguardando++
               } else {
                   if (prevStatus === 'waiting') {
                       deltaNaoEnviados++
@@ -376,7 +461,7 @@ export default function Campanha() {
                           ...d,
                           enviados: (selectedCampanha.enviados || 0) + deltaEnviados,
                           nao_enviados: (selectedCampanha.nao_enviados || 0) + deltaNaoEnviados,
-                          aguardando: Math.max(0, (selectedCampanha.aguardando || 0) + deltaAguardando)
+                          aguardando: aguardarRespostas ? Math.max(0, baseAguardando + deltaAguardando) : 0
                       }
                   }
                   return d
@@ -432,13 +517,13 @@ export default function Campanha() {
                  status: 'ATIVO',
                  enviados: (selectedCampanha.enviados || 0) + deltaEnviados,
                  nao_enviados: (selectedCampanha.nao_enviados || 0) + deltaNaoEnviados,
-                 aguardando: Math.max(0, (selectedCampanha.aguardando || 0) + deltaAguardando),
+                 aguardando: aguardarRespostas ? Math.max(0, baseAguardando + deltaAguardando) : 0,
                  anexo_json: finalAnexo,
                  ...(recorrenciaAtiva ? { bloco_atual: nextBlocoAtual, proxima_execucao: nextExec } : {})
              })
              
              // Reload list to update table and ensure consistency
-             load()
+             load({ refreshSchema: false })
           } catch (updateErr) {
              console.error("Erro ao atualizar status da campanha", updateErr)
              setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] ERRO AO SALVAR NO BANCO: ${updateErr}`])
@@ -496,50 +581,63 @@ export default function Campanha() {
     return { label: 'ATIVO', color: 'green' }
   }
 
-  const load = async () => {
+  const load = useCallback(async (opts?: { refreshSchema?: boolean }) => {
     try {
       setLoading(true)
-      const schema = await api.getCampanhasSchema()
-      const defaultOrder = [
-        'id',
-        'nome',
-        'status',
-        'meta',
-        'enviados',
-        'aguardando',
-        'data_inicio',
-        'data_fim',
-        'created_at',
-      ]
-      const byName: Record<string, { name: string; type: string; nullable: boolean }> = {}
-      for (const c of schema.columns || []) byName[c.name] = c
-      const ordered = defaultOrder.filter(n => byName[n]).map(n => byName[n])
-      const rest = (schema.columns || []).filter(c => !defaultOrder.includes(c.name))
-      setColumnsMeta([...ordered, ...rest])
-      
+      const shouldRefreshSchema = opts?.refreshSchema ?? (columnsMeta.length === 0)
+      if (shouldRefreshSchema) {
+        const schema = await api.getCampanhasSchema()
+        const defaultOrder = [
+          'id',
+          'nome',
+          'status',
+          'meta',
+          'enviados',
+          'aguardando',
+          'data_inicio',
+          'data_fim',
+          'created_at',
+        ]
+        const byName: Record<string, { name: string; type: string; nullable: boolean }> = {}
+        for (const c of schema.columns || []) byName[c.name] = c
+        const ordered = defaultOrder.filter(n => byName[n]).map(n => byName[n])
+        const rest = (schema.columns || []).filter(c => !defaultOrder.includes(c.name))
+        setColumnsMeta([...ordered, ...rest])
+
+        const visDefault: Record<string, boolean> = {}
+        for (const n of defaultOrder) if (byName[n]) visDefault[n] = true
+        for (const c of rest) visDefault[c.name] = false
+        
+        const visKey = `campanhas.columns.visible.${(user as any)?.usuario || 'default'}`
+        const savedVis = localStorage.getItem(visKey)
+        setVisibleCols(savedVis ? JSON.parse(savedVis) : visDefault)
+        
+        const orderKey = `campanhas.columns.order.${(user as any)?.usuario || 'default'}`
+        const savedOrder = localStorage.getItem(orderKey)
+        setOrderedKeys(savedOrder ? JSON.parse(savedOrder) : defaultOrder.filter(n => byName[n]))
+      }
+
       const res = await api.getCampanhas()
       const rows = res.rows || []
       setData(rows)
-
-      const visDefault: Record<string, boolean> = {}
-      for (const n of defaultOrder) if (byName[n]) visDefault[n] = true
-      for (const c of rest) visDefault[c.name] = false
-      
-      const visKey = `campanhas.columns.visible.${(user as any)?.usuario || 'default'}`
-      const savedVis = localStorage.getItem(visKey)
-      setVisibleCols(savedVis ? JSON.parse(savedVis) : visDefault)
-      
-      const orderKey = `campanhas.columns.order.${(user as any)?.usuario || 'default'}`
-      const savedOrder = localStorage.getItem(orderKey)
-      setOrderedKeys(savedOrder ? JSON.parse(savedOrder) : defaultOrder.filter(n => byName[n]))
     } catch (e: any) {
       message.error(e?.response?.data?.detail || 'Erro ao carregar campanhas')
     } finally {
       setLoading(false)
     }
-  }
+  }, [api, columnsMeta.length, message, user])
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { load({ refreshSchema: true }) }, [load])
+
+  useEffect(() => {
+    if (!selectedCampanha || !aguardarRespostasAtivo) return
+    const refresh = async () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+      await load({ refreshSchema: false })
+    }
+    const id = globalThis.setInterval(refresh, 15000)
+    return () => globalThis.clearInterval(id)
+  }, [aguardarRespostasAtivo, load, selectedCampanha?.id])
 
   const baseColumns = columnsMeta.map(col => {
     const dataIndex = col.name
@@ -702,7 +800,7 @@ export default function Campanha() {
                     </Col>
                     <Col flex="1">
                         <Card size="small" style={{ textAlign: 'center', background: '#f9f0ff', borderColor: '#d3adf7' }}>
-                            <Statistic title="AGUARDANDO RESPOSTAS" value={selectedCampanha?.aguardando || 0} valueStyle={{ color: '#722ed1', fontSize: '18px' }} prefix={<SyncOutlined spin={(selectedCampanha?.aguardando || 0) > 0} />} />
+                            <Statistic title="AGUARDANDO RESPOSTAS" value={aguardarRespostasAtivo ? (selectedCampanha?.aguardando || 0) : 0} valueStyle={{ color: '#722ed1', fontSize: '18px' }} prefix={<SyncOutlined spin={aguardarRespostasAtivo && (selectedCampanha?.aguardando || 0) > 0} />} />
                         </Card>
                     </Col>
                 </Row>
@@ -738,6 +836,27 @@ export default function Campanha() {
                  </div>
                  
                  <div style={{ display: 'flex', gap: 8 }}>
+                     <Select
+                       value={selectedEvolutionInstanceId ?? undefined}
+                       placeholder="Instância Evolution"
+                       style={{ minWidth: 220 }}
+                       disabled={!selectedCampanha || !availableEvolutionInstances.length}
+                       options={[
+                         { value: 'ALL', label: 'TODAS AS INSTÂNCIAS (ALTERNAR)' },
+                         ...(availableEvolutionInstances || []).map((x: any) => {
+                           const status = String(x?.connectionStatus || '').toUpperCase()
+                           const nm = String(x?.name || x?.nome || x?.id)
+                           const num = String(x?.number || '').trim()
+                           const label = `${nm}${num ? ` - ${num}` : ''}${status ? ` (${status})` : ''}`
+                           return { value: String(x?.id ?? '').trim(), label }
+                         }),
+                       ]}
+                       onChange={(val) => {
+                         if (val === 'ALL') setSelectedEvolutionInstanceId('ALL')
+                         else setSelectedEvolutionInstanceId((val ? String(val).trim() : null) || null)
+                       }}
+                       allowClear
+                     />
                      <Tooltip title="Atualizar dados e respostas da campanha">
                          <Button
                             onClick={handleAtualizarCampanha}
@@ -817,9 +936,9 @@ export default function Campanha() {
                                      preview={false}
                                  />
                              )}
-                             <div style={{ fontSize: 14, lineHeight: '1.4', color: '#303030', whiteSpace: 'pre-wrap' }}>
+                                 <div style={{ fontSize: 14, lineHeight: '1.4', color: '#303030', whiteSpace: 'pre-wrap' }}>
                                  {(() => {
-                                    const config = (selectedCampanha as any)._config || {}
+                                    const config = selectedCampanhaConfig || {}
                                     let msg = String(selectedCampanha.descricao || '').trim()
                                     if (String(config.response_mode || '').toUpperCase() === 'SIM_NAO') {
                                       const q = String(config.question || '').trim()

@@ -309,16 +309,16 @@ CREATE TABLE IF NOT EXISTS captar.logs_sistema (
     CONSTRAINT fk_log_usuario FOREIGN KEY (usuario_id) REFERENCES captar.usuarios(id) ON DELETE SET NULL
 );
 
--- 17. Tabela de Configurações
-CREATE TABLE IF NOT EXISTS captar.configuracoes (
-    chave VARCHAR(100) PRIMARY KEY,
-    valor TEXT,
-    descricao TEXT,
-    tipo_dado VARCHAR(50) DEFAULT 'TEXTO',  -- TEXTO, NUMERO, BOOLEANO, JSON
-    categoria VARCHAR(50) DEFAULT 'GERAL',
-    atualizado_por INTEGER,
-    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_configuracao_atualizado_por FOREIGN KEY (atualizado_por) REFERENCES captar.usuarios(id) ON DELETE SET NULL
+CREATE TABLE IF NOT EXISTS captar."EvolutionAPI" (
+    "IdEvolutionAPI" SERIAL PRIMARY KEY,
+    "Nome" VARCHAR(150) NOT NULL,
+    "InstanceName" VARCHAR(150) NOT NULL,
+    "ApiKey" TEXT NOT NULL,
+    "BaseUrl" TEXT NOT NULL,
+    "Ativo" BOOLEAN DEFAULT TRUE,
+    "Padrao" BOOLEAN DEFAULT FALSE,
+    "CriadoEm" TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    "AtualizadoEm" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Inserir permissões padrão
@@ -352,19 +352,6 @@ INSERT INTO captar.usuarios (
     (SELECT id FROM captar.permissoes WHERE perfil = 'ADMINISTRADOR' LIMIT 1),
     TRUE
 ) ON CONFLICT (email) DO NOTHING;
-
--- Inserir configurações padrão
-INSERT INTO captar.configuracoes (chave, valor, descricao, tipo_dado, categoria) VALUES 
-('SISTEMA_NOME', 'CAPTAR', 'Nome do sistema', 'TEXTO', 'GERAL'),
-('SISTEMA_VERSAO', '2.0.0', 'Versão do sistema', 'TEXTO', 'GERAL'),
-('PAGINACAO_ITENS_POR_PAGINA', '20', 'Número de itens por página nas listagens', 'NUMERO', 'INTERFACE'),
-('EMAIL_SERVIDOR', '', 'Servidor SMTP para envio de e-mails', 'TEXTO', 'EMAIL'),
-('EMAIL_PORTA', '587', 'Porta do servidor SMTP', 'NUMERO', 'EMAIL'),
-('EMAIL_USUARIO', '', 'Usuário para autenticação no servidor SMTP', 'TEXTO', 'EMAIL'),
-('EMAIL_SENHA', '', 'Senha para autenticação no servidor SMTP', 'TEXTO', 'EMAIL'),
-('WHATSAPP_API_KEY', '', 'Chave da API do WhatsApp', 'TEXTO', 'INTEGRACAO'),
-('SMS_API_KEY', '', 'Chave da API de SMS', 'TEXTO', 'INTEGRACAO')
-ON CONFLICT (chave) DO NOTHING;
 
 -- Criar índices para melhorar desempenho
 CREATE INDEX IF NOT EXISTS idx_eleitores_nome ON captar."Eleitores"("Nome");

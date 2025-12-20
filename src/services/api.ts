@@ -1059,18 +1059,77 @@ class ApiService {
 
   // ==================== CONFIGURAÇÕES & INTEGRAÇÕES ====================
 
-  async getConfiguracoes(categoria?: string): Promise<any[]> {
-    const response = await this.api.get('/configuracoes', { params: { categoria } })
+  async listEvolutionApis(): Promise<any[]> {
+    const response = await this.api.get('/integracoes/evolution/instances')
+    return response.data?.rows || []
+  }
+
+  async createEvolutionApi(payload: { nome: string; instance_name: string; api_key: string; base_url: string; ativo?: boolean; padrao?: boolean }): Promise<{ id: number }> {
+    const response = await this.api.post('/evolution-apis', payload)
     return response.data
   }
 
-  async updateConfiguracao(chave: string, valor: string): Promise<any> {
-    const response = await this.api.put(`/configuracoes/${chave}`, { valor })
+  async updateEvolutionApi(id: number, payload: { nome?: string; instance_name?: string; api_key?: string; base_url?: string; ativo?: boolean; padrao?: boolean }): Promise<{ id: number; updated: boolean }> {
+    const response = await this.api.put(`/evolution-apis/${id}`, payload)
     return response.data
   }
 
-  async sendWhatsAppMessage(phone: string, message: string, media?: string, textPosition?: 'top' | 'bottom'): Promise<any> {
-    const response = await this.api.post('/integrations/whatsapp/send', { phone, message, media_url: media, text_position: textPosition })
+  async deleteEvolutionApi(id: number): Promise<{ id: number; deleted: boolean }> {
+    const response = await this.api.delete(`/evolution-apis/${id}`)
+    return response.data
+  }
+
+  async listEvolutionInstances(): Promise<{ rows: any[] }> {
+    const response = await this.api.get('/integracoes/evolution/instances')
+    return response.data
+  }
+
+  async getDisparos(params?: { limit?: number; campanha_id?: number; numero?: string }): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/disparos', { params })
+    return response.data
+  }
+
+  async getCampanhaDisparosGrid(campanhaId: number, limit_contacts?: number): Promise<{ campanha: any; pergunta: string; stats: any; rows: any[]; columns: string[] }> {
+    const response = await this.api.get(`/campanhas/${campanhaId}/disparos-grid`, { params: { limit_contacts } })
+    return response.data
+  }
+
+  async getRelatorios(params?: { limit?: number; campanha_id?: number }): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/relatorios', { params })
+    return response.data
+  }
+
+  async getRelatorio(id: number): Promise<any> {
+    const response = await this.api.get(`/relatorios/${id}`)
+    return response.data
+  }
+
+  async downloadRelatorioPdf(id: number, orientation?: 'portrait' | 'landscape'): Promise<Blob> {
+    const response = await this.api.get(`/relatorios/${id}/pdf`, { responseType: 'blob', params: orientation ? { orientation } : undefined })
+    return response.data
+  }
+
+  async createRelatorioComprovante(payload: { campanha_id: number; titulo?: string }): Promise<any> {
+    const response = await this.api.post('/relatorios/comprovante', payload)
+    return response.data
+  }
+
+  async sendWhatsAppMessage(
+    phone: string,
+    message: string,
+    media?: string,
+    textPosition?: 'top' | 'bottom',
+    meta?: { campanha_id?: number; contato_nome?: string; evolution_api_id?: string },
+  ): Promise<any> {
+    const response = await this.api.post('/integrations/whatsapp/send', {
+      phone,
+      message,
+      media_url: media,
+      text_position: textPosition,
+      campanha_id: meta?.campanha_id,
+      contato_nome: meta?.contato_nome,
+      evolution_api_id: meta?.evolution_api_id,
+    })
     return response.data
   }
 }

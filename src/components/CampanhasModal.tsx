@@ -1,4 +1,4 @@
-import { Avatar, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Radio, Space, Upload, message } from 'antd'
+import { Avatar, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Radio, Select, Space, Upload, message } from 'antd'
 import { CloseCircleOutlined, CloudUploadOutlined, FileTextOutlined, SaveOutlined, TeamOutlined, ThunderboltOutlined, UploadOutlined } from '@ant-design/icons'
 import { useEffect, useState, useMemo } from 'react'
 import { useApi } from '../context/ApiContext'
@@ -25,6 +25,8 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
   const [modoResposta, setModoResposta] = useState<'nenhum' | 'sim_nao'>('nenhum')
   const [perguntaSimNao, setPerguntaSimNao] = useState('')
   const [recorrenciaAtiva, setRecorrenciaAtiva] = useState(false)
+  const [evolutionApis, setEvolutionApis] = useState<any[]>([])
+  const [evolutionApiIds, setEvolutionApiIds] = useState<string[]>([])
   
   const api = useApi()
   const { user } = useAuthStore()
@@ -89,6 +91,14 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
 
   useEffect(() => {
     if (open) {
+      ;(async () => {
+        try {
+          const list = await api.listEvolutionApis()
+          setEvolutionApis(list || [])
+        } catch {
+          setEvolutionApis([])
+        }
+      })()
       if (initial) {
         form.setFieldsValue({
           ...initial,
@@ -117,6 +127,13 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
               setPosicaoImagem(parsedAnexo.config.text_position || 'bottom')
               setModoResposta(parsedAnexo.config.response_mode === 'SIM_NAO' ? 'sim_nao' : 'nenhum')
               setPerguntaSimNao(String(parsedAnexo.config.question || ''))
+              const cfg = parsedAnexo.config || {}
+              const idsRaw = (cfg.evolution_api_ids ?? cfg.evolution_api_id) as any
+              const arr = Array.isArray(idsRaw) ? idsRaw : (idsRaw !== undefined && idsRaw !== null ? [idsRaw] : [])
+              const parsedIds = arr
+                .map((x: any) => String(x ?? '').trim())
+                .filter((s: any) => !!s)
+              setEvolutionApiIds(parsedIds)
             }
           } catch {}
         }
@@ -158,6 +175,7 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
         setModoResposta('nenhum')
         setPerguntaSimNao('')
         setRecorrenciaAtiva(false)
+        setEvolutionApiIds([])
         
         // Reset stats
         setMeta(0)
@@ -282,6 +300,9 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
       if (modoResposta === 'sim_nao') {
         configToSave.response_mode = 'SIM_NAO'
         configToSave.question = String(perguntaSimNao || '').trim()
+      }
+      if (evolutionApiIds.length) {
+        configToSave.evolution_api_ids = evolutionApiIds
       }
       
       if (destino === 'arquivo' && fileList.length > 0) {
@@ -436,7 +457,7 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
           <Form.Item
             name="descricao"
             label="DESCRIÇÃO / MENSAGEM"
-            rules={[{ required: true, whitespace: true, message: 'Informe a mensagem' }]}
+            rules={[{ whitespace: true, message: 'Mensagem inválida' }]}
             extra={
               <div style={{ fontSize: 10, color: '#666' }}>
                 Dica: Use <strong>(NOME)</strong> ou <strong>{'{NOME}'}</strong> para substituir pelo nome do contato.<br/>
@@ -455,6 +476,24 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
                   <DatePicker style={{ width: 150 }} format="DD/MM/YYYY" />
                </Form.Item>
           </Space>
+
+          <Form.Item label="EVOLUTION API (INSTÂNCIAS)">
+            <Select
+              mode="multiple"
+              allowClear
+              value={evolutionApiIds}
+              placeholder={evolutionApis.length ? 'Selecione uma ou mais instâncias' : 'Nenhuma instância encontrada'}
+              options={(evolutionApis || [])
+                .map((x: any) => ({
+                  value: String(x.id ?? '').trim(),
+                  label: `${String(x.name || x.nome || x.instance_name || x.id)}${x.number ? ` - ${String(x.number)}` : ''}${x.connectionStatus ? ` (${String(x.connectionStatus)})` : ''}`,
+                }))}
+              onChange={(vals) => {
+                const arr = Array.isArray(vals) ? vals : []
+                setEvolutionApiIds(arr.map(v => String(v ?? '').trim()).filter((s: any) => !!s))
+              }}
+            />
+          </Form.Item>
 
           <Form.Item label="IMAGEM DA MENSAGEM">
                <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>

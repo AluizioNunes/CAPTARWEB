@@ -6,10 +6,11 @@ Integração de todas as 15 melhorias prioritárias
 from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, BackgroundTasks, Request, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, date, timezone
 import os
 from dotenv import load_dotenv
 import redis
@@ -28,6 +29,7 @@ import time
 from urllib.request import urlopen
 import urllib.request
 from urllib.error import URLError, HTTPError
+from urllib.parse import urlparse, urlunparse
 import ssl
 import gzip
 import zlib
@@ -35,6 +37,7 @@ import base64
 import re
 import pathlib
 import aiohttp
+import asyncio
 import traceback
 import uuid
 import unicodedata
@@ -379,42 +382,209 @@ async def tenants_set_dsn(slug: str, body: SetDsnRequest):
 
 # ==================== CONFIGURAÇÕES & INTEGRAÇÕES ====================
 
-class ConfigUpdate(BaseModel):
-    valor: str
+_EVOLUTION_INSTANCE_COLS: Tuple[List[str], float] = ([], 0.0)
 
-@app.get("/api/configuracoes")
-async def get_configuracoes(categoria: Optional[str] = None):
+def _evolution_instance_columns(conn) -> List[str]:
+    now = time.time()
+    cols, exp = _EVOLUTION_INSTANCE_COLS
+    if cols and exp > now:
+        return cols
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = %s AND table_name = %s
+        ORDER BY ordinal_position
+        """,
+        ("EvolutionAPI", "Instance"),
+    )
+    rows = cursor.fetchall()
+    cols = [str(r[0]) for r in rows] if rows else []
+    globals()["_EVOLUTION_INSTANCE_COLS"] = (cols, now + 300.0)
+    return cols
+
+def _pick_column(cols: List[str], candidates: List[str]) -> Optional[str]:
+    m = {str(c).lower(): str(c) for c in (cols or [])}
+    for cand in candidates:
+        k = str(cand).lower()
+        if k in m:
+            return m[k]
+    return None
+
+def _evolution_instance_fields(conn) -> Dict[str, Optional[str]]:
+    cols = _evolution_instance_columns(conn)
+    id_col = _pick_column(cols, ["id", "Id", "ID"])
+    name_col = _pick_column(cols, ["name", "Name", "instanceName", "InstanceName"])
+    token_col = _pick_column(cols, ["token", "Token", "apiKey", "ApiKey", "apikey"])
+    status_col = _pick_column(cols, ["connectionStatus", "ConnectionStatus", "status", "Status"])
+    number_col = _pick_column(cols, ["number", "Number", "phone", "phoneNumber", "celular", "whatsapp", "ownerJid"])
+    if not id_col or not name_col:
+        raise HTTPException(status_code=500, detail='Tabela "EvolutionAPI"."Instance" inválida (colunas ausentes).')
+    return {"id": id_col, "name": name_col, "token": token_col, "status": status_col, "number": number_col}
+
+def _get_evolution_base_url(conn) -> str:
+    base = str(os.getenv("EVOLUTION_API_BASE", "") or "").strip() or str(os.getenv("WHATSAPP_API_URL", "") or "").strip()
+    if base:
+        return str(base).rstrip("/")
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = %s AND table_name = 'configuracoes'
+            )
+            """,
+            (DB_SCHEMA,),
+        )
+        has_cfg = bool(cur.fetchone()[0])
+        if has_cfg:
+            cur.execute(
+                f"""
+                SELECT valor
+                FROM "{DB_SCHEMA}".configuracoes
+                WHERE chave = 'WHATSAPP_API_URL'
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                return str(row[0]).strip().rstrip("/")
+    except Exception:
+        pass
+    return "http://evolution_api:4000"
+
+def _list_evolution_instances(conn) -> List[dict]:
+    f = _evolution_instance_fields(conn)
+    id_sel = f"\"{f['id']}\"::text"
+    token_sel = f"\"{f['token']}\"" if f.get("token") else "NULL::text"
+    status_sel = f"\"{f['status']}\"" if f.get("status") else "NULL::text"
+    number_sel = f"\"{f['number']}\"" if f.get("number") else "NULL::text"
+    cursor = conn.cursor()
+    cursor.execute(
+        f"""
+        SELECT {id_sel}, "{f['name']}", {number_sel}, {token_sel}, {status_sel}
+        FROM "EvolutionAPI"."Instance"
+        ORDER BY "{f['name']}" ASC
+        """
+    )
+    rows = cursor.fetchall() or []
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "id": str(r[0] or "").strip(),
+                "name": str(r[1] or "").strip(),
+                "number": str(r[2] or "").strip(),
+                "hasToken": bool(str(r[3] or "").strip()),
+                "connectionStatus": str(r[4] or "").strip(),
+            }
+        )
+    return out
+
+def _get_evolution_instance(conn, instance_id: Optional[Union[str, int]]) -> Dict[str, Any]:
+    f = _evolution_instance_fields(conn)
+    id_sel = f"\"{f['id']}\"::text"
+    token_sel = f"\"{f['token']}\"" if f.get("token") else "NULL::text"
+    status_sel = f"\"{f['status']}\"" if f.get("status") else "NULL::text"
+    number_sel = f"\"{f['number']}\"" if f.get("number") else "NULL::text"
+    cursor = conn.cursor()
+    chosen_id = str(instance_id).strip() if instance_id is not None else ""
+    if chosen_id:
+        cursor.execute(
+            f"""
+            SELECT {id_sel}, "{f['name']}", {number_sel}, {token_sel}, {status_sel}
+            FROM "EvolutionAPI"."Instance"
+            WHERE "{f['id']}"::text=%s
+            LIMIT 1
+            """,
+            (chosen_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Instância Evolution API não encontrada.")
+    else:
+        row = None
+        if f.get("status"):
+            try:
+                cursor.execute(
+                    f"""
+                    SELECT {id_sel}, "{f['name']}", {number_sel}, {token_sel}, {status_sel}
+                    FROM "EvolutionAPI"."Instance"
+                    WHERE "{f['status']}"=%s
+                    ORDER BY "{f['name']}" ASC
+                    LIMIT 1
+                    """,
+                    ("CONNECTED",),
+                )
+                row = cursor.fetchone()
+            except Exception:
+                row = None
+        if not row:
+            cursor.execute(
+                f"""
+                SELECT {id_sel}, "{f['name']}", {number_sel}, {token_sel}, {status_sel}
+                FROM "EvolutionAPI"."Instance"
+                ORDER BY "{f['name']}" ASC
+                LIMIT 1
+                """
+            )
+            row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=500, detail="Nenhuma instância Evolution API encontrada no banco.")
+    inst_name = str(row[1] or "").strip()
+    number = str(row[2] or "").strip()
+    token = str(row[3] or "").strip()
+    status = str(row[4] or "").strip()
+    if not inst_name:
+        raise HTTPException(status_code=500, detail="Instância Evolution API inválida (name vazio).")
+    return {"id": str(row[0] or "").strip(), "name": inst_name, "number": number, "token": token, "connectionStatus": status}
+
+def _evolution_base_url_candidates(base_url: str) -> List[str]:
+    s = str(base_url or "").strip()
+    if not s:
+        return []
+    if not re.match(r"^https?://", s, re.IGNORECASE):
+        s = f"http://{s}"
+    p = urlparse(s)
+    host = (p.hostname or "").strip().lower()
+    scheme = (p.scheme or "http").strip().lower()
+    port = p.port
+    path = (p.path or "").rstrip("/")
+    netloc = p.netloc
+    if port is None and p.hostname:
+        netloc = p.hostname
+    primary = urlunparse((scheme, netloc, path, "", "", "")).rstrip("/")
+    out: List[str] = []
+    def add(u: str):
+        uu = str(u or "").strip().rstrip("/")
+        if uu and uu not in out:
+            out.append(uu)
+    add(primary)
+    if scheme == "https":
+        add(urlunparse(("http", netloc, path, "", "", "")).rstrip("/"))
+    if host == "evolution_api":
+        if port == 4400:
+            add(urlunparse(("http", "evolution_api:4000", path, "", "", "")).rstrip("/"))
+            add(urlunparse(("https", "evolution_api:4000", path, "", "", "")).rstrip("/"))
+        if port is None:
+            add(urlunparse((scheme, "evolution_api:4000", path, "", "", "")).rstrip("/"))
+        if port == 80:
+            add(urlunparse((scheme, "evolution_api:4000", path, "", "", "")).rstrip("/"))
+        if port == 443:
+            add(urlunparse(("http", "evolution_api:4000", path, "", "", "")).rstrip("/"))
+    return out
+
+@app.get("/api/integracoes/evolution/instances")
+async def integracoes_evolution_instances():
     try:
         with get_db_connection() as conn:
-            cursor = conn.cursor()
-            if categoria:
-                cursor.execute(f"SELECT chave, valor, descricao, categoria FROM \"{DB_SCHEMA}\".configuracoes WHERE categoria = %s", (categoria,))
-            else:
-                cursor.execute(f"SELECT chave, valor, descricao, categoria FROM \"{DB_SCHEMA}\".configuracoes")
-            
-            rows = cursor.fetchall()
-            return [
-                {"chave": r[0], "valor": r[1], "descricao": r[2], "categoria": r[3]} 
-                for r in rows
-            ]
-    except Exception as e:
-        # If table doesn't exist yet, return empty
-        return []
-
-@app.put("/api/configuracoes/{chave}")
-async def update_configuracao(chave: str, config: ConfigUpdate, request: Request):
-    try:
-        # Check permissions here if needed (e.g. only Admin)
-        user = _extract_user_from_auth(request) # Helper might raise if not auth, assuming it exists or we skip for now
-        
-        with get_conn_for_request(request) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                f"UPDATE \"{DB_SCHEMA}\".configuracoes SET valor = %s, atualizado_em = NOW() WHERE chave = %s",
-                (config.valor, chave)
-            )
-            conn.commit()
-            return {"message": "Configuração atualizada"}
+            rows = _list_evolution_instances(conn)
+        return {"rows": rows}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -424,25 +594,24 @@ class WhatsAppSendRequest(BaseModel):
     media_url: Optional[str] = None
     media_type: Optional[str] = "image"
     text_position: Optional[str] = "bottom" # bottom (caption) or top (text then image)
+    campanha_id: Optional[int] = None
+    contato_nome: Optional[str] = None
+    evolution_api_id: Optional[str] = None
 
 @app.post("/api/integrations/whatsapp/send")
 async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
     try:
-        # 1. Get Configs
+        evo = None
         with get_conn_for_request(request) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                f"SELECT chave, valor FROM \"{DB_SCHEMA}\".configuracoes WHERE chave IN ('WHATSAPP_INSTANCE_NAME', 'WHATSAPP_API_KEY', 'WHATSAPP_API_URL')"
-            )
-            rows = cursor.fetchall()
-            config = {r[0]: r[1] for r in rows}
-        
-        instance = config.get('WHATSAPP_INSTANCE_NAME')
-        api_key = config.get('WHATSAPP_API_KEY')
-        base_url = config.get('WHATSAPP_API_URL')
-        
-        if not instance or not api_key or not base_url:
-            raise HTTPException(status_code=500, detail="Configuração do WhatsApp incompleta no servidor.")
+            evo = _get_evolution_instance(conn, data.evolution_api_id)
+            base_url = _get_evolution_base_url(conn)
+        instance = evo["name"]
+        api_key = str(evo.get("token") or "").strip() or str(os.getenv("AUTHENTICATION_API_KEY", "") or "").strip()
+        if not api_key:
+            raise HTTPException(status_code=500, detail="Token da instância Evolution API não encontrado.")
+        base_candidates = _evolution_base_url_candidates(base_url)
+        if not base_candidates:
+            raise HTTPException(status_code=500, detail="Configuração da Evolution API incompleta no servidor.")
             
         # 1.5. Resolve Media URL if local filename
         final_media_url = data.media_url
@@ -470,89 +639,224 @@ async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
         }
 
         async with aiohttp.ClientSession() as session:
-            # Logic for Text Position
-            if final_media_url and data.text_position == 'top':
-                # 1. Send Text First
-                url_text = f"{base_url}/message/sendText/{instance}"
-                payload_text = {
-                    "number": data.phone,
-                    "text": data.message,
-                    "delay": 1200,
-                    "linkPreview": True
-                }
-                print(f"Sending WhatsApp TEXT (TOP) to URL: {url_text}")
-                async with session.post(url_text, json=payload_text, headers=headers, timeout=30) as resp_text:
-                    if resp_text.status not in (200, 201):
-                        text = await resp_text.text()
-                        print(f"Evolution API Error (Text): {resp_text.status} - {text}")
-                        # Don't fail completely if text fails? Or fail? Let's fail.
-                        code = resp_text.status if resp_text.status < 500 else 502
-                        raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp (Texto): {text}")
-                
-                # 2. Send Image Second (No Caption)
-                url_media = f"{base_url}/message/sendMedia/{instance}"
-                print(f"Sending WhatsApp MEDIA (TOP) to URL: {url_media}")
-                payload_media = {
-                    "number": data.phone,
-                    "mediatype": "image",
-                    "media": final_media_url,
-                    "delay": 1200,
-                    "linkPreview": True
-                }
-                async with session.post(url_media, json=payload_media, headers=headers, timeout=30) as resp_media:
-                    if resp_media.status not in (200, 201):
-                        text = await resp_media.text()
-                        code = resp_media.status if resp_media.status < 500 else 502
-                        raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp (Mídia): {text}")
-                    return await resp_media.json()
+            last_conn_err = None
+            for base_try in base_candidates:
+                try:
+                    if final_media_url and data.text_position == 'top':
+                        msg = str(data.message or '').strip()
+                        if msg:
+                            url_text = f"{base_try}/message/sendText/{instance}"
+                            payload_text = {
+                                "number": data.phone,
+                                "text": msg,
+                                "delay": 1200,
+                                "linkPreview": True
+                            }
+                            print(f"Sending WhatsApp TEXT (TOP) to URL: {url_text}")
+                            async with session.post(url_text, json=payload_text, headers=headers, timeout=30) as resp_text:
+                                if resp_text.status not in (200, 201):
+                                    text = await resp_text.text()
+                                    print(f"Evolution API Error (Text): {resp_text.status} - {text}")
+                                    code = resp_text.status if resp_text.status < 500 else 502
+                                    raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp (Texto): {text}")
+                        
+                        url_media = f"{base_try}/message/sendMedia/{instance}"
+                        print(f"Sending WhatsApp MEDIA (TOP) to URL: {url_media}")
+                        payload_media = {
+                            "number": data.phone,
+                            "mediatype": "image",
+                            "media": final_media_url,
+                            "delay": 1200,
+                            "linkPreview": True
+                        }
+                        async with session.post(url_media, json=payload_media, headers=headers, timeout=30) as resp_media:
+                            if resp_media.status not in (200, 201):
+                                text = await resp_media.text()
+                                code = resp_media.status if resp_media.status < 500 else 502
+                                raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp (Mídia): {text}")
+                            resp_json = await resp_media.json()
+                            try:
+                                with get_conn_for_request(request) as conn_log:
+                                    cursor_log = conn_log.cursor()
+                                    tid_log = _tenant_id_from_header(request)
+                                    cursor_log.execute(
+                                        f"""
+                                        INSERT INTO "{DB_SCHEMA}"."Disparos"
+                                        ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload")
+                                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),%s::jsonb)
+                                        """,
+                                        (
+                                            tid_log,
+                                            data.campanha_id,
+                                            'WHATSAPP',
+                                            'OUT',
+                                            _digits_only(data.phone),
+                                            (data.contato_nome or None),
+                                            (data.message or ''),
+                                            (final_media_url or None),
+                                            'ENVIADO',
+                                            json.dumps(resp_json, ensure_ascii=False),
+                                        ),
+                                    )
+                                    conn_log.commit()
+                            except Exception:
+                                pass
+                            return resp_json
 
-            elif final_media_url:
-                # Standard: Image with Caption (Bottom)
-                # Endpoint: /message/sendMedia/{instance}
-                url = f"{base_url}/message/sendMedia/{instance}"
-                print(f"Sending WhatsApp MEDIA (BOTTOM) to URL: {url} with Instance: {instance}")
-                
-                payload = {
-                    "number": data.phone,
-                    "mediatype": "image",
-                    "caption": data.message,
-                    "media": final_media_url,
-                    "delay": 1200,
-                    "linkPreview": True
-                }
-                async with session.post(url, json=payload, headers=headers, timeout=30) as response:
-                    if response.status not in (200, 201):
-                        text = await response.text()
-                        print(f"Evolution API Error: {response.status} - {text}")
-                        code = response.status if response.status < 500 else 502
-                        raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp: {text}")
-                    return await response.json()
-            
-            else:
-                # Text Only
-                url = f"{base_url}/message/sendText/{instance}"
-                print(f"Sending WhatsApp TEXT to URL: {url} with Instance: {instance}")
-                
-                payload = {
-                    "number": data.phone,
-                    "text": data.message,
-                    "delay": 1200,
-                    "linkPreview": True
-                }
-                
-                async with session.post(url, json=payload, headers=headers, timeout=30) as response:
-                    if response.status not in (200, 201):
-                        text = await response.text()
-                        print(f"Evolution API Error: {response.status} - {text}")
-                        code = response.status if response.status < 500 else 502
-                        raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp: {text}")
-                    return await response.json()
+                    if final_media_url:
+                        url = f"{base_try}/message/sendMedia/{instance}"
+                        print(f"Sending WhatsApp MEDIA (BOTTOM) to URL: {url} with Instance: {instance}")
+                        payload = {
+                            "number": data.phone,
+                            "mediatype": "image",
+                            "caption": data.message,
+                            "media": final_media_url,
+                            "delay": 1200,
+                            "linkPreview": True
+                        }
+                        async with session.post(url, json=payload, headers=headers, timeout=30) as response:
+                            if response.status not in (200, 201):
+                                text = await response.text()
+                                print(f"Evolution API Error: {response.status} - {text}")
+                                code = response.status if response.status < 500 else 502
+                                raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp: {text}")
+                            resp_json = await response.json()
+                            try:
+                                with get_conn_for_request(request) as conn_log:
+                                    cursor_log = conn_log.cursor()
+                                    tid_log = _tenant_id_from_header(request)
+                                    cursor_log.execute(
+                                        f"""
+                                        INSERT INTO "{DB_SCHEMA}"."Disparos"
+                                        ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload")
+                                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),%s::jsonb)
+                                        """,
+                                        (
+                                            tid_log,
+                                            data.campanha_id,
+                                            'WHATSAPP',
+                                            'OUT',
+                                            _digits_only(data.phone),
+                                            (data.contato_nome or None),
+                                            (data.message or ''),
+                                            (final_media_url or None),
+                                            'ENVIADO',
+                                            json.dumps(resp_json, ensure_ascii=False),
+                                        ),
+                                    )
+                                    conn_log.commit()
+                            except Exception:
+                                pass
+                            return resp_json
+                    
+                    url = f"{base_try}/message/sendText/{instance}"
+                    print(f"Sending WhatsApp TEXT to URL: {url} with Instance: {instance}")
+                    payload = {
+                        "number": data.phone,
+                        "text": data.message,
+                        "delay": 1200,
+                        "linkPreview": True
+                    }
+                    async with session.post(url, json=payload, headers=headers, timeout=30) as response:
+                        if response.status not in (200, 201):
+                            text = await response.text()
+                            print(f"Evolution API Error: {response.status} - {text}")
+                            code = response.status if response.status < 500 else 502
+                            raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp: {text}")
+                        resp_json = await response.json()
+                        try:
+                            with get_conn_for_request(request) as conn_log:
+                                cursor_log = conn_log.cursor()
+                                tid_log = _tenant_id_from_header(request)
+                                cursor_log.execute(
+                                    f"""
+                                    INSERT INTO "{DB_SCHEMA}"."Disparos"
+                                    ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload")
+                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),%s::jsonb)
+                                    """,
+                                    (
+                                        tid_log,
+                                        data.campanha_id,
+                                        'WHATSAPP',
+                                        'OUT',
+                                        _digits_only(data.phone),
+                                        (data.contato_nome or None),
+                                        (data.message or ''),
+                                        None,
+                                        'ENVIADO',
+                                        json.dumps(resp_json, ensure_ascii=False),
+                                    ),
+                                )
+                                conn_log.commit()
+                        except Exception:
+                            pass
+                        return resp_json
+                except HTTPException:
+                    raise
+                except (aiohttp.ClientConnectorError, aiohttp.ClientConnectionError, asyncio.TimeoutError, OSError) as ce:
+                    last_conn_err = ce
+                    continue
+            if last_conn_err:
+                raise HTTPException(status_code=502, detail=f"Falha ao conectar na Evolution API. BaseUrl={base_url}. Tentativas={base_candidates}. Erro={str(last_conn_err)}")
+            raise HTTPException(status_code=502, detail="Falha ao enviar mensagem no WhatsApp.")
 
     except HTTPException as he:
+        try:
+            with get_conn_for_request(request) as conn_log:
+                cursor_log = conn_log.cursor()
+                tid_log = _tenant_id_from_header(request)
+                cursor_log.execute(
+                    f"""
+                    INSERT INTO "{DB_SCHEMA}"."Disparos"
+                    ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload")
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),%s::jsonb)
+                    """,
+                    (
+                        tid_log,
+                        data.campanha_id,
+                        'WHATSAPP',
+                        'OUT',
+                        _digits_only(data.phone),
+                        (data.contato_nome or None),
+                        (data.message or ''),
+                        (data.media_url or None),
+                        'FALHA',
+                        json.dumps({"error": he.detail}, ensure_ascii=False),
+                    ),
+                )
+                conn_log.commit()
+        except Exception:
+            pass
         raise he
     except Exception as e:
         print(f"Error sending whatsapp: {e}")
         traceback.print_exc()
+        try:
+            with get_conn_for_request(request) as conn_log:
+                cursor_log = conn_log.cursor()
+                tid_log = _tenant_id_from_header(request)
+                cursor_log.execute(
+                    f"""
+                    INSERT INTO "{DB_SCHEMA}"."Disparos"
+                    ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload")
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),%s::jsonb)
+                    """,
+                    (
+                        tid_log,
+                        data.campanha_id,
+                        'WHATSAPP',
+                        'OUT',
+                        _digits_only(data.phone),
+                        (data.contato_nome or None),
+                        (data.message or ''),
+                        (data.media_url or None),
+                        'FALHA',
+                        json.dumps({"error": str(e)}, ensure_ascii=False),
+                    ),
+                )
+                conn_log.commit()
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail=str(e))
 
 def _digits_only(s: Any) -> str:
@@ -560,6 +864,587 @@ def _digits_only(s: Any) -> str:
         return ''.join([c for c in str(s or '') if c.isdigit()])
     except Exception:
         return ''
+
+def _json_safe(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date)):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    try:
+        return str(value)
+    except Exception:
+        return None
+
+def _format_dt_br(v: Any) -> str:
+    try:
+        if v is None:
+            return ''
+        if isinstance(v, datetime):
+            return v.strftime('%d/%m/%Y %H:%M:%S')
+        if isinstance(v, date):
+            return v.strftime('%d/%m/%Y')
+        s = str(v)
+        if not s:
+            return ''
+        try:
+            dt = datetime.fromisoformat(s.replace('Z', '+00:00'))
+            return dt.strftime('%d/%m/%Y %H:%M:%S')
+        except Exception:
+            return s
+    except Exception:
+        return ''
+
+def _truncate_text(v: Any, max_len: int = 80) -> str:
+    try:
+        s = str(v or '')
+        s = re.sub(r'\s+', ' ', s).strip()
+        if len(s) <= max_len:
+            return s
+        if max_len <= 3:
+            return s[:max_len]
+        return s[: max_len - 3] + '...'
+    except Exception:
+        return ''
+
+def _normalize_resposta_classificacao(v: Any) -> str:
+    s = str(v or '').strip().upper()
+    if not s:
+        return 'AGUARDANDO'
+    if s in ('POSITIVO', 'SIM', 'YES', 'TRUE', 'OK'):
+        return 'POSITIVO'
+    if s in ('NEGATIVO', 'NAO', 'NÃO', 'NO', 'FALSE'):
+        return 'NEGATIVO'
+    if s in ('AGUARDANDO', 'PENDENTE', 'PENDING', 'WAITING', 'EM_ABERTO'):
+        return 'AGUARDANDO'
+    return s
+
+def _safe_json_obj(v: Any) -> Any:
+    if v is None:
+        return None
+    if isinstance(v, (dict, list)):
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            return json.loads(s)
+        except Exception:
+            return None
+    return None
+
+def _contact_phone_raw(c: Any) -> Any:
+    if not isinstance(c, dict):
+        return None
+    return (
+        c.get('whatsapp')
+        or c.get('celular')
+        or c.get('telefone')
+        or c.get('phone')
+        or c.get('numero')
+        or c.get('Número')
+        or c.get('Numero')
+        or c.get('destino')
+        or c.get('Destinatario')
+        or c.get('destinatario')
+        or c.get('to')
+    )
+
+def _contact_name_raw(c: Any) -> Any:
+    if not isinstance(c, dict):
+        return None
+    return (
+        c.get('nome')
+        or c.get('Nome')
+        or c.get('NOME')
+        or c.get('nome_destinatario')
+        or c.get('nomeDestinatario')
+        or c.get('nome_destino')
+        or c.get('destinatario_nome')
+    )
+
+def _anexo_contacts_list(anexo_obj: Any) -> List[dict]:
+    if anexo_obj is None:
+        return []
+    if isinstance(anexo_obj, list):
+        return [x for x in anexo_obj if isinstance(x, dict)]
+    if isinstance(anexo_obj, dict):
+        contacts = anexo_obj.get('contacts')
+        if isinstance(contacts, list):
+            return [x for x in contacts if isinstance(x, dict)]
+    return []
+
+def _anexo_question(anexo_obj: Any) -> str:
+    if not isinstance(anexo_obj, dict):
+        return ''
+    cfg = anexo_obj.get('config')
+    if not isinstance(cfg, dict):
+        return ''
+    q = cfg.get('question') or cfg.get('pergunta') or cfg.get('texto') or cfg.get('mensagem')
+    return str(q or '').strip()
+
+def _campanha_contacts(
+    cursor,
+    *,
+    tid: int,
+    campanha_id: int,
+    anexo_obj: Any,
+    limit: int = 20000,
+) -> List[Dict[str, Any]]:
+    if isinstance(anexo_obj, dict) and bool(anexo_obj.get('usar_eleitores') or False):
+        cursor.execute(
+            f"""
+            SELECT "Nome", COALESCE(NULLIF("Celular", ''), NULLIF("Telefone", ''))
+            FROM "{DB_SCHEMA}"."Eleitores"
+            WHERE "IdTenant" = %s
+              AND COALESCE(NULLIF("Celular", ''), NULLIF("Telefone", '')) IS NOT NULL
+            ORDER BY "IdEleitor" DESC
+            LIMIT %s
+            """,
+            (tid, int(limit)),
+        )
+        out: List[Dict[str, Any]] = []
+        for nome, num in cursor.fetchall() or []:
+            numero = _digits_only(num)
+            if not numero:
+                continue
+            out.append({"nome": str(nome or '').strip() or '—', "numero": numero})
+        return out
+
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for c in _anexo_contacts_list(anexo_obj)[: int(limit)]:
+        numero = _digits_only(_contact_phone_raw(c))
+        if not numero or numero in seen:
+            continue
+        seen.add(numero)
+        nome = str(_contact_name_raw(c) or '').strip() or '—'
+        out.append({"nome": nome, "numero": numero})
+    return out
+
+def _campanha_disparos_grid(
+    cursor,
+    *,
+    tid: int,
+    campanha_id: int,
+    limit_contacts: int = 20000,
+    limit_logs: int = 200000,
+) -> Tuple[Dict[str, Any], str, Dict[str, int], List[Dict[str, Any]]]:
+    def _to_utc_naive(dt: Optional[datetime]) -> Optional[datetime]:
+        try:
+            if dt is None:
+                return None
+            if isinstance(dt, datetime) and dt.tzinfo is not None:
+                return dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return dt
+        except Exception:
+            return dt
+
+    def _parse_iso_dt(v: Any) -> Optional[datetime]:
+        try:
+            if v is None:
+                return None
+            if isinstance(v, datetime):
+                return _to_utc_naive(v)
+            if isinstance(v, (int, float)):
+                if v <= 0:
+                    return None
+                return datetime.utcfromtimestamp(float(v))
+            s = str(v or '').strip()
+            if not s:
+                return None
+            try:
+                return _to_utc_naive(datetime.fromisoformat(s.replace('Z', '+00:00')))
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    cursor.execute(
+        f"""
+        SELECT "IdCampanha" as id,
+               "NomeCampanha" as nome,
+               "Texto" as descricao,
+               "Cadastrante" as cadastrante,
+               "DataCriacao" as criado_em,
+               "DataInicio" as data_inicio,
+               "DataFim" as data_fim,
+               "AnexoJSON" as anexo_json
+        FROM "{DB_SCHEMA}"."Campanhas"
+        WHERE "IdCampanha" = %s AND "IdTenant" = %s
+        """,
+        (int(campanha_id), int(tid)),
+    )
+    campanha_row = cursor.fetchone()
+    if not campanha_row:
+        raise HTTPException(status_code=404, detail="Campanha não encontrada")
+    cols_c = [d[0] for d in cursor.description]
+    campanha_obj = dict(zip(cols_c, campanha_row))
+
+    anexo_obj = _safe_json_obj(campanha_obj.get('anexo_json'))
+    pergunta = _anexo_question(anexo_obj) or str(campanha_obj.get('descricao') or '').strip()
+
+    contatos = _campanha_contacts(cursor, tid=tid, campanha_id=campanha_id, anexo_obj=anexo_obj, limit=limit_contacts)
+    by_num: Dict[str, Dict[str, Any]] = {}
+    by_num_last11: Dict[str, Optional[Dict[str, Any]]] = {}
+    for c in contatos:
+        numero = _digits_only(c.get('numero'))
+        if not numero:
+            continue
+        ent = {
+            "numero": numero,
+            "nome": str(c.get('nome') or '').strip() or '—',
+            "envio_datahora": None,
+            "envio_status": None,
+            "resposta_datahora": None,
+            "resposta_classificacao": None,
+            "resposta_texto": None,
+        }
+        by_num[numero] = ent
+        k11 = numero[-11:] if len(numero) > 11 else numero
+        prev = by_num_last11.get(k11)
+        if prev is None and k11 in by_num_last11:
+            continue
+        if prev is not None and prev is not ent:
+            by_num_last11[k11] = None
+        else:
+            by_num_last11[k11] = ent
+
+    def _find_ent(numero_digits: str) -> Optional[Dict[str, Any]]:
+        if not numero_digits:
+            return None
+        direct = by_num.get(numero_digits)
+        if direct is not None:
+            return direct
+        k11 = numero_digits[-11:] if len(numero_digits) > 11 else numero_digits
+        ent = by_num_last11.get(k11)
+        return ent if ent is not None else None
+
+    try:
+        for c in _anexo_contacts_list(anexo_obj)[: int(limit_contacts)]:
+            if not isinstance(c, dict):
+                continue
+            numero = _digits_only(_contact_phone_raw(c))
+            if not numero:
+                continue
+            ent = _find_ent(numero)
+            if ent is None:
+                continue
+            nome = str(_contact_name_raw(c) or '').strip()
+            if nome:
+                ent['nome'] = nome
+            status_val = str(c.get('status') or '').strip().lower()
+            if status_val == 'success':
+                ent['envio_status'] = 'ENVIADO'
+                sent_dt = _parse_iso_dt(c.get('enviado_em') or c.get('enviadoEm') or c.get('sent_at') or c.get('sentAt'))
+                cur_dt = _to_utc_naive(ent.get('envio_datahora')) if isinstance(ent.get('envio_datahora'), datetime) else None
+                if sent_dt and (cur_dt is None or sent_dt >= cur_dt):
+                    ent['envio_datahora'] = sent_dt
+            elif status_val == 'error':
+                if not ent.get('envio_status'):
+                    ent['envio_status'] = 'FALHA'
+                sent_dt = _parse_iso_dt(c.get('enviado_em') or c.get('enviadoEm') or c.get('sent_at') or c.get('sentAt'))
+                if sent_dt and ent.get('envio_datahora') is None:
+                    ent['envio_datahora'] = sent_dt
+
+            resposta_val = c.get('resposta')
+            if resposta_val is None:
+                resposta_val = c.get('response')
+            if resposta_val is None:
+                resposta_val = c.get('Resposta')
+            if resposta_val is None:
+                resposta_val = c.get('RESP')
+            if resposta_val in (1, '1', True, 'SIM', 'sim', 'S', 's'):
+                ent['resposta_classificacao'] = 'POSITIVO'
+            elif resposta_val in (2, '2', False, 'NAO', 'NÃO', 'nao', 'não', 'N', 'n'):
+                ent['resposta_classificacao'] = 'NEGATIVO'
+            responded_dt = _parse_iso_dt(c.get('respondido_em') or c.get('respondidoEm') or c.get('replied_at') or c.get('repliedAt'))
+            cur_resp_dt = _to_utc_naive(ent.get('resposta_datahora')) if isinstance(ent.get('resposta_datahora'), datetime) else None
+            if responded_dt and (cur_resp_dt is None or responded_dt >= cur_resp_dt):
+                ent['resposta_datahora'] = responded_dt
+    except Exception:
+        pass
+
+    cursor.execute(
+        f"""
+        SELECT "Direcao" as direcao,
+               "Numero" as numero,
+               "Nome" as nome,
+               "Status" as status,
+               "DataHora" as datahora,
+               "Mensagem" as mensagem,
+               "RespostaClassificacao" as resposta
+        FROM "{DB_SCHEMA}"."Disparos"
+        WHERE "IdTenant" = %s AND "IdCampanha" = %s
+        ORDER BY "IdDisparo" ASC
+        LIMIT %s
+        """,
+        (int(tid), int(campanha_id), int(limit_logs)),
+    )
+    disp_rows = cursor.fetchall()
+    disp_cols = [d[0] for d in cursor.description]
+    for r in disp_rows or []:
+        d = dict(zip(disp_cols, r))
+        numero = _digits_only(d.get('numero'))
+        if not numero:
+            continue
+        ent = _find_ent(numero)
+        if ent is None:
+            continue
+        direcao = str(d.get('direcao') or '').upper()
+        datahora = _to_utc_naive(d.get('datahora')) if isinstance(d.get('datahora'), datetime) else d.get('datahora')
+        status = str(d.get('status') or '').upper()
+        nome = str(d.get('nome') or '').strip()
+        mensagem = d.get('mensagem')
+        resposta = d.get('resposta')
+
+        if nome and (ent.get('nome') in (None, '', '—')):
+            ent['nome'] = nome
+
+        if direcao == 'OUT':
+            cur_dt = ent.get('envio_datahora')
+            if (cur_dt is None) or (isinstance(datahora, datetime) and isinstance(cur_dt, datetime) and datahora >= cur_dt) or (cur_dt is None and datahora):
+                ent['envio_datahora'] = datahora
+                ent['envio_status'] = status or '—'
+        elif direcao == 'IN':
+            cur_dt = ent.get('resposta_datahora')
+            if (cur_dt is None) or (isinstance(datahora, datetime) and isinstance(cur_dt, datetime) and datahora >= cur_dt) or (cur_dt is None and datahora):
+                ent['resposta_datahora'] = datahora
+                ent['resposta_classificacao'] = _normalize_resposta_classificacao(resposta)
+                ent['resposta_texto'] = mensagem
+
+    linhas: List[Dict[str, Any]] = []
+    for ent in by_num.values():
+        if not ent.get('envio_status'):
+            ent['envio_status'] = 'PENDENTE'
+        if not ent.get('resposta_classificacao'):
+            ent['resposta_classificacao'] = 'AGUARDANDO'
+        if not ent.get('resposta_texto'):
+            ent['resposta_texto'] = '—'
+        linhas.append(ent)
+    linhas.sort(key=lambda x: (str(x.get('nome') or ''), str(x.get('numero') or '')))
+
+    enviados = 0
+    falhas = 0
+    respostas_qtd = 0
+    positivos = 0
+    negativos = 0
+    aguardando = 0
+    for it in linhas:
+        envio_status = str(it.get('envio_status') or '').upper()
+        if envio_status == 'ENVIADO':
+            enviados += 1
+        if envio_status == 'FALHA':
+            falhas += 1
+        if it.get('resposta_datahora'):
+            respostas_qtd += 1
+        rc = _normalize_resposta_classificacao(it.get('resposta_classificacao'))
+        if rc == 'POSITIVO':
+            positivos += 1
+        elif rc == 'NEGATIVO':
+            negativos += 1
+        else:
+            aguardando += 1
+
+    stats_obj = {
+        "enviados": enviados,
+        "falhas": falhas,
+        "respostas": respostas_qtd,
+        "positivos": positivos,
+        "negativos": negativos,
+        "aguardando": aguardando,
+        "total_contatos": len(linhas),
+    }
+    return campanha_obj, pergunta, stats_obj, linhas
+
+def _find_captar_logo_path() -> Optional[str]:
+    candidates: List[Union[str, pathlib.Path]] = []
+    env_path = os.getenv('CAPTAR_LOGO_PATH') or ''
+    if env_path.strip():
+        candidates.append(env_path.strip())
+
+    try:
+        here = pathlib.Path(__file__).resolve()
+        root = here.parent
+        if len(here.parents) >= 3:
+            root = here.parents[2]
+
+        candidates.extend([
+            root / 'src' / 'images' / 'CAPTAR LOGO OFICIAL.jpg',
+            root / 'src' / 'images' / 'CAPTAR LOGO OFICIAL.jpeg',
+            root / 'src' / 'images' / 'CAPTAR LOGO OFICIAL.png',
+        ])
+        candidates.extend([
+            pathlib.Path.cwd() / 'src' / 'images' / 'CAPTAR LOGO OFICIAL.jpg',
+            pathlib.Path.cwd() / 'src' / 'images' / 'CAPTAR LOGO OFICIAL.jpeg',
+            pathlib.Path.cwd() / 'src' / 'images' / 'CAPTAR LOGO OFICIAL.png',
+        ])
+        candidates.extend([
+            here.parent / 'static' / 'captar_logo.jpg',
+            here.parent / 'static' / 'captar_logo.png',
+        ])
+    except Exception:
+        pass
+
+    for p in candidates:
+        try:
+            pp = p if isinstance(p, pathlib.Path) else pathlib.Path(str(p))
+            if pp.exists() and pp.is_file():
+                return str(pp)
+        except Exception:
+            continue
+    return None
+
+def _static_relatorios_dir() -> str:
+    base = os.path.join(os.path.dirname(__file__), 'static', 'relatorios')
+    os.makedirs(base, exist_ok=True)
+    return base
+
+def _build_comprovante_pdf_bytes(
+    *,
+    titulo: str,
+    campanha: dict,
+    pergunta: str,
+    stats: dict,
+    linhas: List[dict],
+    orientation: str = 'portrait',
+) -> bytes:
+    try:
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.lib.utils import ImageReader
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Dependência ausente para PDF: {e}")
+
+    buffer = io.BytesIO()
+    o = str(orientation or 'portrait').strip().lower()
+    if o in ('paisagem', 'landscape', 'l'):
+        pagesize = landscape(A4)
+    else:
+        pagesize = A4
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=pagesize,
+        leftMargin=18 * mm,
+        rightMargin=18 * mm,
+        topMargin=26 * mm,
+        bottomMargin=18 * mm,
+        title=titulo,
+    )
+    styles = getSampleStyleSheet()
+    style_title = styles['Title']
+    style_normal = styles['BodyText']
+    style_normal.leading = 12
+
+    def draw_header(canvas, doc_obj):
+        w, h = doc_obj.pagesize
+        canvas.saveState()
+        logo_path = _find_captar_logo_path()
+        if logo_path:
+            try:
+                img = ImageReader(logo_path)
+                canvas.drawImage(img, doc.leftMargin, h - 18 * mm, width=38 * mm, height=12 * mm, preserveAspectRatio=True, mask='auto')
+            except Exception:
+                pass
+        canvas.setFont('Helvetica-Bold', 12)
+        canvas.drawString(doc.leftMargin + 42 * mm, h - 14 * mm, 'CAPTAR')
+        canvas.setFont('Helvetica', 9)
+        canvas.drawRightString(w - doc.rightMargin, h - 14 * mm, f'Gerado em: {_format_dt_br(datetime.now())}')
+        canvas.setStrokeColor(colors.lightgrey)
+        canvas.line(doc.leftMargin, h - 18.5 * mm, w - doc.rightMargin, h - 18.5 * mm)
+        canvas.restoreState()
+
+    elements: List[Any] = []
+    elements.append(Paragraph(titulo, style_title))
+    elements.append(Spacer(1, 6))
+
+    nome = campanha.get('nome') or ''
+    periodo_ini = _format_dt_br(campanha.get('data_inicio') or '')
+    periodo_fim = _format_dt_br(campanha.get('data_fim') or '')
+    criado_em = _format_dt_br(campanha.get('criado_em') or '')
+    cadastrante = str(campanha.get('cadastrante') or '')
+
+    elements.append(Paragraph(f"<b>Campanha:</b> {nome} (#{campanha.get('id')})", style_normal))
+    if criado_em:
+        elements.append(Paragraph(f"<b>Data de criação:</b> {criado_em}", style_normal))
+    if periodo_ini or periodo_fim:
+        elements.append(Paragraph(f"<b>Período:</b> {periodo_ini or '—'} até {periodo_fim or '—'}", style_normal))
+    if cadastrante:
+        elements.append(Paragraph(f"<b>Cadastrante:</b> {cadastrante}", style_normal))
+    if pergunta:
+        elements.append(Spacer(1, 4))
+        elements.append(Paragraph(f"<b>Pergunta / Mensagem enviada:</b> {_truncate_text(pergunta, 350)}", style_normal))
+
+    elements.append(Spacer(1, 6))
+    elements.append(Paragraph(
+        f"<b>Totais:</b> Enviados={int(stats.get('enviados', 0) or 0)} | Falhas={int(stats.get('falhas', 0) or 0)} | Respostas={int(stats.get('respostas', 0) or 0)}"
+        f" | Positivos={int(stats.get('positivos', 0) or 0)} | Negativos={int(stats.get('negativos', 0) or 0)} | Aguardando={int(stats.get('aguardando', 0) or 0)}",
+        style_normal
+    ))
+    elements.append(Spacer(1, 10))
+
+    header = [
+        'NOME',
+        'NÚMERO',
+        'ENVIO (DATA/HORA)',
+        'STATUS ENVIO',
+        'RESPOSTA',
+        'RESPOSTA (DATA/HORA)',
+        'TEXTO RESPOSTA',
+    ]
+    data_rows: List[List[Any]] = [header]
+    for it in linhas:
+        data_rows.append([
+            Paragraph(_truncate_text(it.get('nome') or '—', 60) or '—', style_normal),
+            Paragraph(_truncate_text(it.get('numero') or '', 30) or '—', style_normal),
+            Paragraph(_format_dt_br(it.get('envio_datahora') or ''), style_normal),
+            Paragraph(str(it.get('envio_status') or '—').upper(), style_normal),
+            Paragraph(str(it.get('resposta_classificacao') or '—').upper(), style_normal),
+            Paragraph(_format_dt_br(it.get('resposta_datahora') or ''), style_normal),
+            Paragraph(_truncate_text(it.get('resposta_texto') or '', 80) or '—', style_normal),
+        ])
+
+    base_col_widths = [44 * mm, 27 * mm, 30 * mm, 23 * mm, 18 * mm, 30 * mm, 34 * mm]
+    total_w = float(sum(base_col_widths))
+    avail_w = float(getattr(doc, 'width', total_w))
+    if total_w > 0 and avail_w > 0 and total_w > avail_w:
+        factor = avail_w / total_w
+        col_widths = [w * factor for w in base_col_widths]
+    else:
+        col_widths = base_col_widths
+    table = Table(data_rows, colWidths=col_widths, repeatRows=1)
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1f2937')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 9),
+        ('ALIGN', (1, 1), (1, -1), 'LEFT'),
+        ('ALIGN', (2, 1), (5, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('GRID', (0, 0), (-1, -1), 0.25, colors.lightgrey),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f3f4f6')]),
+        ('FONTSIZE', (0, 1), (-1, -1), 8),
+        ('LEFTPADDING', (0, 0), (-1, -1), 4),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 3),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+    ]))
+    elements.append(table)
+
+    doc.build(elements, onFirstPage=draw_header, onLaterPages=draw_header)
+    return buffer.getvalue()
 
 def _strip_accents(s: str) -> str:
     try:
@@ -647,28 +1532,132 @@ def _extract_evolution_number(payload: Any) -> str:
         if payload is None:
             return ''
         if isinstance(payload, dict):
-            for k in ('from', 'number', 'phone', 'remoteJid', 'sender'):
-                v = payload.get(k)
-                if v:
-                    d = _digits_only(v)
-                    if d:
-                        return d
             data = payload.get('data') or payload.get('event') or payload.get('payload')
             if isinstance(data, dict):
-                for k in ('from', 'number', 'phone', 'remoteJid', 'sender'):
+                key = data.get('key')
+                if isinstance(key, dict):
+                    remote = key.get('remoteJid')
+                    if remote and isinstance(remote, str) and '@g.us' in remote:
+                        participant = key.get('participant') or data.get('participant')
+                        d = _digits_only(participant)
+                        if d:
+                            return d
+                    d = _digits_only(remote)
+                    if d:
+                        return d
+                    participant = key.get('participant') or data.get('participant')
+                    d = _digits_only(participant)
+                    if d:
+                        return d
+
+                for k in ('remoteJid', 'chatId', 'jid', 'sender', 'from', 'number', 'phone'):
                     v = data.get(k)
                     if v:
                         d = _digits_only(v)
                         if d:
                             return d
-                key = data.get('key')
-                if isinstance(key, dict) and key.get('remoteJid'):
-                    d = _digits_only(key.get('remoteJid'))
+
+            key = payload.get('key')
+            if isinstance(key, dict):
+                remote = key.get('remoteJid')
+                if remote and isinstance(remote, str) and '@g.us' in remote:
+                    participant = key.get('participant') or payload.get('participant')
+                    d = _digits_only(participant)
+                    if d:
+                        return d
+                d = _digits_only(remote)
+                if d:
+                    return d
+                participant = key.get('participant') or payload.get('participant')
+                d = _digits_only(participant)
+                if d:
+                    return d
+
+            for k in ('remoteJid', 'chatId', 'jid', 'sender', 'from', 'number', 'phone'):
+                v = payload.get(k)
+                if v:
+                    d = _digits_only(v)
                     if d:
                         return d
         return ''
     except Exception:
         return ''
+
+def _iter_evolution_events(payload: Any) -> List[Dict[str, Any]]:
+    try:
+        if payload is None:
+            return []
+        if isinstance(payload, list):
+            return [x for x in payload if isinstance(x, dict)]
+        if not isinstance(payload, dict):
+            return []
+
+        data = payload.get('data') or payload.get('event') or payload.get('payload')
+        if isinstance(data, dict):
+            msgs = data.get('messages')
+            if isinstance(msgs, list) and msgs:
+                out: List[Dict[str, Any]] = []
+                for m in msgs:
+                    if isinstance(m, dict):
+                        out.append({"data": m})
+                if out:
+                    return out
+        msgs2 = payload.get('messages')
+        if isinstance(msgs2, list) and msgs2:
+            out2: List[Dict[str, Any]] = []
+            for m in msgs2:
+                if isinstance(m, dict):
+                    out2.append({"data": m})
+            if out2:
+                return out2
+
+        return [payload]
+    except Exception:
+        return []
+
+def _extract_evolution_datetime(payload: Any) -> Optional[datetime]:
+    try:
+        if payload is None:
+            return None
+        if isinstance(payload, dict):
+            data = payload.get('data') or payload.get('event') or payload.get('payload') or {}
+            candidates = []
+            if isinstance(data, dict):
+                candidates.extend([
+                    data.get('messageTimestamp'),
+                    data.get('timestamp'),
+                    data.get('t'),
+                ])
+                msg = data.get('message')
+                if isinstance(msg, dict):
+                    candidates.extend([
+                        msg.get('messageTimestamp'),
+                        msg.get('timestamp'),
+                        msg.get('t'),
+                    ])
+            candidates.extend([payload.get('messageTimestamp'), payload.get('timestamp'), payload.get('t')])
+
+            for v in candidates:
+                if v is None:
+                    continue
+                if isinstance(v, (int, float)):
+                    ts = float(v)
+                else:
+                    s = str(v).strip()
+                    if not s:
+                        continue
+                    try:
+                        ts = float(s)
+                    except Exception:
+                        continue
+                if ts > 10_000_000_000:
+                    ts = ts / 1000.0
+                if ts <= 0:
+                    continue
+                return datetime.utcfromtimestamp(ts)
+        return None
+    except Exception:
+        return None
 
 def _match_phone(stored: Any, incoming_digits: str) -> bool:
     def norm_br(d: str) -> str:
@@ -705,15 +1694,6 @@ def _match_phone(stored: Any, incoming_digits: str) -> bool:
 @app.post("/api/integrations/whatsapp/webhook")
 async def whatsapp_webhook(payload: Dict[str, Any], request: Request, tenant: Optional[str] = None):
     try:
-        incoming_text = _extract_evolution_text(payload).strip()
-        incoming_digits = _extract_evolution_number(payload)
-        if not incoming_text or not incoming_digits:
-            return {"ok": True, "ignored": True, "reason": "missing_text_or_number"}
-
-        resposta = _parse_sim_nao_response(incoming_text)
-        if resposta not in (1, 2):
-            return {"ok": True, "ignored": True, "reason": "not_sim_nao"}
-
         slug = (request.headers.get('X-Tenant') or tenant or 'captar').strip() or 'captar'
         try:
             rc = get_redis_client()
@@ -748,126 +1728,460 @@ async def whatsapp_webhook(payload: Dict[str, Any], request: Request, tenant: Op
 
         with get_db_connection(dsn) as conn:
             cursor = conn.cursor()
+            events = _iter_evolution_events(payload)
+            if not events:
+                return {"ok": True, "ignored": True, "reason": "no_events"}
+
             cursor.execute(
                 f"""
-                SELECT "IdCampanha"
-                FROM "{DB_SCHEMA}"."Campanhas"
-                WHERE "IdTenant" = %s
-                  AND COALESCE("AnexoJSON"->'config'->>'response_mode', '') = 'SIM_NAO'
-                ORDER BY "IdCampanha" DESC
+                SELECT d."IdDisparo", d."Numero", d."IdCampanha"
+                FROM "{DB_SCHEMA}"."Disparos" d
+                JOIN "{DB_SCHEMA}"."Campanhas" c
+                  ON c."IdTenant" = d."IdTenant"
+                 AND c."IdCampanha" = d."IdCampanha"
+                WHERE d."IdTenant" = %s
+                  AND d."Canal" = 'WHATSAPP'
+                  AND d."Direcao" = 'OUT'
+                  AND d."Status" = 'ENVIADO'
+                  AND d."IdCampanha" IS NOT NULL
+                  AND COALESCE(c."AnexoJSON"->'config'->>'response_mode', '') = 'SIM_NAO'
+                ORDER BY d."DataHora" DESC, d."IdDisparo" DESC
+                LIMIT 500
                 """,
-                (tid,)
+                (tid,),
             )
-            ids = [r[0] for r in cursor.fetchall()]
-            for campanha_id in ids:
-                cursor.execute(
-                    f"""
-                    SELECT "AnexoJSON", "Positivos", "Negativos", "Aguardando"
-                    FROM "{DB_SCHEMA}"."Campanhas"
-                    WHERE "IdCampanha" = %s AND "IdTenant" = %s
-                    FOR UPDATE
-                    """,
-                    (campanha_id, tid)
-                )
-                locked = cursor.fetchone()
-                if not locked:
-                    conn.rollback()
+            out_rows = cursor.fetchall() or []
+
+            updated: List[Dict[str, Any]] = []
+            ignored: List[Dict[str, Any]] = []
+
+            for ev in events:
+                incoming_text = _extract_evolution_text(ev).strip()
+                incoming_digits = _extract_evolution_number(ev)
+                if not incoming_text or not incoming_digits:
+                    ignored.append({"reason": "missing_text_or_number"})
                     continue
 
-                anexo = locked[0]
-                positivos = int(locked[1] or 0)
-                negativos = int(locked[2] or 0)
-                aguardando = int(locked[3] or 0)
-
-                if not anexo:
-                    conn.rollback()
-                    continue
-
-                anexo_obj: Any = anexo
-                if isinstance(anexo_obj, str):
+                received_dt = _extract_evolution_datetime(ev) or datetime.utcnow()
+                inserted_in_id = None
+                try:
+                    cursor.execute(
+                        f"""
+                        INSERT INTO "{DB_SCHEMA}"."Disparos"
+                        ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload")
+                        VALUES (%s,NULL,%s,%s,%s,NULL,%s,NULL,%s,%s,%s::jsonb)
+                        RETURNING "IdDisparo"
+                        """,
+                        (
+                            tid,
+                            'WHATSAPP',
+                            'IN',
+                            str(incoming_digits),
+                            incoming_text,
+                            'RECEBIDO',
+                            received_dt,
+                            json.dumps(ev, ensure_ascii=False),
+                        ),
+                    )
+                    row_in = cursor.fetchone()
+                    inserted_in_id = int(row_in[0]) if row_in else None
+                    conn.commit()
+                except Exception:
                     try:
-                        anexo_obj = json.loads(anexo_obj)
-                    except Exception:
                         conn.rollback()
+                    except Exception:
+                        pass
+
+                resposta = _parse_sim_nao_response(incoming_text)
+                if resposta not in (1, 2):
+                    ignored.append({"number": incoming_digits, "reason": "not_sim_nao"})
+                    continue
+
+                candidates = [(out_id_raw, out_num, campanha_id) for (out_id_raw, out_num, campanha_id) in out_rows if _match_phone(out_num, incoming_digits)]
+                if not candidates:
+                    ignored.append({"number": incoming_digits, "reason": "no_matching_out_disparo"})
+                    continue
+
+                applied = False
+                for out_id_raw, out_num, campanha_id in candidates:
+                    cursor.execute(
+                        f"""
+                        SELECT "AnexoJSON", "Positivos", "Negativos", "Enviados"
+                        FROM "{DB_SCHEMA}"."Campanhas"
+                        WHERE "IdCampanha" = %s AND "IdTenant" = %s
+                        FOR UPDATE
+                        """,
+                        (campanha_id, tid),
+                    )
+                    locked = cursor.fetchone()
+                    if not locked:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
                         continue
 
-                if isinstance(anexo_obj, list):
-                    anexo_obj = {"contacts": anexo_obj, "config": {"response_mode": "SIM_NAO"}}
+                    anexo = locked[0]
+                    positivos = int(locked[1] or 0)
+                    negativos = int(locked[2] or 0)
+                    enviados = int(locked[3] or 0)
 
-                if not isinstance(anexo_obj, dict):
-                    conn.rollback()
-                    continue
-
-                contacts = anexo_obj.get('contacts')
-                if not isinstance(contacts, list):
-                    conn.rollback()
-                    continue
-
-                idx_match = -1
-                for i, c in enumerate(contacts):
-                    if not isinstance(c, dict):
+                    if not anexo:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
                         continue
-                    phone = c.get('whatsapp') or c.get('celular') or c.get('telefone') or c.get('phone')
-                    if _match_phone(phone, incoming_digits):
-                        idx_match = i
-                        break
 
-                if idx_match < 0:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
+                    anexo_obj: Any = anexo
+                    if isinstance(anexo_obj, str):
+                        try:
+                            anexo_obj = json.loads(anexo_obj)
+                        except Exception:
+                            try:
+                                conn.rollback()
+                            except Exception:
+                                pass
+                            continue
+
+                    if isinstance(anexo_obj, list):
+                        anexo_obj = {"contacts": anexo_obj, "config": {"response_mode": "SIM_NAO"}}
+
+                    if not isinstance(anexo_obj, dict):
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        continue
+
+                    contacts = anexo_obj.get('contacts')
+                    if not isinstance(contacts, list):
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        continue
+
+                    idx_match = -1
+                    for i, c in enumerate(contacts):
+                        if not isinstance(c, dict):
+                            continue
+                        phone = c.get('whatsapp') or c.get('celular') or c.get('telefone') or c.get('phone')
+                        if _match_phone(phone, incoming_digits):
+                            idx_match = i
+                            break
+
+                    if idx_match < 0:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        continue
+
+                    cur = contacts[idx_match]
+                    existing = cur.get('resposta') if isinstance(cur, dict) else None
+                    if existing in (1, 2, '1', '2'):
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        continue
+
+                    cur['resposta'] = resposta
+                    cur['respondido_em'] = (received_dt or datetime.utcnow()).isoformat()
+                    contacts[idx_match] = cur
+                    anexo_obj['contacts'] = contacts
+
+                    if resposta == 1:
+                        positivos += 1
+                    else:
+                        negativos += 1
+
+                    aguardando = max(0, enviados - (positivos + negativos))
+                    cursor.execute(
+                        f"""
+                        UPDATE "{DB_SCHEMA}"."Campanhas"
+                        SET "AnexoJSON" = %s::jsonb,
+                            "Positivos" = %s,
+                            "Negativos" = %s,
+                            "Aguardando" = %s,
+                            "Atualizacao" = NOW()
+                        WHERE "IdCampanha" = %s AND "IdTenant" = %s
+                        """,
+                        (json.dumps(anexo_obj, ensure_ascii=False), positivos, negativos, aguardando, campanha_id, tid),
+                    )
+
+                    if inserted_in_id:
+                        try:
+                            cursor.execute(
+                                f"""
+                                UPDATE "{DB_SCHEMA}"."Disparos"
+                                SET "IdCampanha" = %s,
+                                    "RespostaClassificacao" = %s,
+                                    "IdDisparoRef" = %s
+                                WHERE "IdDisparo" = %s AND "IdTenant" = %s
+                                """,
+                                (
+                                    campanha_id,
+                                    ('SIM' if resposta == 1 else 'NAO'),
+                                    int(out_id_raw) if out_id_raw is not None else None,
+                                    inserted_in_id,
+                                    tid,
+                                ),
+                            )
+                        except Exception:
+                            pass
+
+                    conn.commit()
+                    updated.append({"number": incoming_digits, "campanha_id": campanha_id, "resposta": resposta})
+                    applied = True
+                    break
+
+                if not applied:
+                    ignored.append({"number": incoming_digits, "reason": "no_applicable_campaign"})
                     continue
 
-                cur = contacts[idx_match]
-                status_val = cur.get('status') if isinstance(cur, dict) else None
-                if str(status_val or '').lower() != 'success':
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-                    continue
-                existing = cur.get('resposta') if isinstance(cur, dict) else None
-                if existing in (1, 2, '1', '2'):
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-                    return {"ok": True, "ignored": True, "already": True, "campanha_id": campanha_id}
-
-                cur['resposta'] = resposta
-                cur['respondido_em'] = datetime.utcnow().isoformat()
-                contacts[idx_match] = cur
-                anexo_obj['contacts'] = contacts
-
-                if resposta == 1:
-                    positivos += 1
-                else:
-                    negativos += 1
-                aguardando = max(0, aguardando - 1)
-
-                cursor.execute(
-                    f"""
-                    UPDATE "{DB_SCHEMA}"."Campanhas"
-                    SET "AnexoJSON" = %s::jsonb,
-                        "Positivos" = %s,
-                        "Negativos" = %s,
-                        "Aguardando" = %s,
-                        "Atualizacao" = NOW()
-                    WHERE "IdCampanha" = %s AND "IdTenant" = %s
-                    """,
-                    (json.dumps(anexo_obj, ensure_ascii=False), positivos, negativos, aguardando, campanha_id, tid)
-                )
-                conn.commit()
-                return {"ok": True, "campanha_id": campanha_id, "resposta": resposta, "tenant": slug}
-
-            conn.rollback()
-            return {"ok": True, "ignored": True, "reason": "no_matching_contact_or_campaign", "tenant": slug}
+            return {
+                "ok": True,
+                "tenant": slug,
+                "processed": len(events),
+                "updated": updated,
+                "ignored": ignored,
+            }
     except Exception as e:
         try:
             traceback.print_exc()
         except Exception:
             pass
+        raise HTTPException(status_code=500, detail=str(e))
+
+class RelatorioComprovanteRequest(BaseModel):
+    campanha_id: int
+    titulo: Optional[str] = None
+
+@app.get("/api/disparos")
+async def disparos_list(limit: int = 1000, campanha_id: Optional[int] = None, numero: Optional[str] = None, request: Request = None):
+    try:
+        with get_conn_for_request(request) as conn:
+            cursor = conn.cursor()
+            tid = _tenant_id_from_header(request)
+            where = ['"IdTenant" = %s']
+            values: List[Any] = [tid]
+            if campanha_id is not None:
+                where.append('"IdCampanha" = %s')
+                values.append(int(campanha_id))
+            if numero:
+                where.append('"Numero" ILIKE %s')
+                values.append(f"%{_digits_only(numero)}%")
+            cursor.execute(
+                f"""
+                SELECT "IdDisparo" as id,
+                       "Canal" as canal,
+                       "Numero" as destino,
+                       "Nome" as nome,
+                       "Direcao" as direcao,
+                       "Status" as status,
+                       "DataHora" as datahora,
+                       "IdCampanha" as campanha_id,
+                       "Mensagem" as mensagem,
+                       "Imagem" as imagem,
+                       "RespostaClassificacao" as resposta
+                FROM "{DB_SCHEMA}"."Disparos"
+                WHERE {' AND '.join(where)}
+                ORDER BY "IdDisparo" DESC
+                LIMIT %s
+                """,
+                tuple(values + [int(limit)]),
+            )
+            rows = cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+            return {"rows": [dict(zip(cols, r)) for r in rows], "columns": cols}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/campanhas/{id}/disparos-grid")
+async def campanhas_disparos_grid(id: int, request: Request, limit_contacts: int = 20000):
+    try:
+        with get_conn_for_request(request) as conn:
+            cursor = conn.cursor()
+            tid = _tenant_id_from_header(request)
+            campanha_obj, pergunta, stats_obj, linhas = _campanha_disparos_grid(
+                cursor,
+                tid=tid,
+                campanha_id=int(id),
+                limit_contacts=int(limit_contacts),
+            )
+            cols = ["nome", "numero", "envio_datahora", "envio_status", "resposta_classificacao", "resposta_datahora", "resposta_texto"]
+            return {"campanha": campanha_obj, "pergunta": pergunta, "stats": stats_obj, "rows": linhas, "columns": cols}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/relatorios")
+async def relatorios_list(limit: int = 200, campanha_id: Optional[int] = None, request: Request = None):
+    try:
+        with get_conn_for_request(request) as conn:
+            cursor = conn.cursor()
+            tid = _tenant_id_from_header(request)
+            where = ['"IdTenant" = %s']
+            values: List[Any] = [tid]
+            if campanha_id is not None:
+                where.append('"IdCampanha" = %s')
+                values.append(int(campanha_id))
+            cursor.execute(
+                f"""
+                SELECT "IdRelatorio" as id,
+                       "IdCampanha" as campanha_id,
+                       "Titulo" as titulo,
+                       "Tipo" as tipo,
+                       "CriadoEm" as criado_em,
+                       "CriadoPor" as criado_por
+                FROM "{DB_SCHEMA}"."Relatorios"
+                WHERE {' AND '.join(where)}
+                ORDER BY "IdRelatorio" DESC
+                LIMIT %s
+                """,
+                tuple(values + [int(limit)]),
+            )
+            rows = cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+            return {"rows": [dict(zip(cols, r)) for r in rows], "columns": cols}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/relatorios/{id}")
+async def relatorios_get(id: int, request: Request):
+    try:
+        with get_conn_for_request(request) as conn:
+            cursor = conn.cursor()
+            tid = _tenant_id_from_header(request)
+            cursor.execute(
+                f"""
+                SELECT "IdRelatorio" as id,
+                       "IdCampanha" as campanha_id,
+                       "Titulo" as titulo,
+                       "Tipo" as tipo,
+                       "Parametros" as parametros,
+                       "Dados" as dados,
+                       "CriadoEm" as criado_em,
+                       "CriadoPor" as criado_por
+                FROM "{DB_SCHEMA}"."Relatorios"
+                WHERE "IdRelatorio" = %s AND "IdTenant" = %s
+                """,
+                (int(id), tid),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Relatório não encontrado")
+            cols = [d[0] for d in cursor.description]
+            return dict(zip(cols, row))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/relatorios/{id}/pdf")
+async def relatorios_get_pdf(id: int, request: Request, orientation: str = 'portrait'):
+    try:
+        with get_conn_for_request(request) as conn:
+            cursor = conn.cursor()
+            tid = _tenant_id_from_header(request)
+            cursor.execute(
+                f"""
+                SELECT "IdRelatorio" as id,
+                       "IdCampanha" as campanha_id,
+                       "Titulo" as titulo,
+                       "Tipo" as tipo
+                FROM "{DB_SCHEMA}"."Relatorios"
+                WHERE "IdRelatorio" = %s AND "IdTenant" = %s
+                """,
+                (int(id), tid),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Relatório não encontrado")
+            cols = [d[0] for d in cursor.description]
+            rel = dict(zip(cols, row))
+            if str(rel.get('tipo') or '').upper() != 'COMPROVANTE':
+                raise HTTPException(status_code=400, detail="Relatório não é do tipo comprovante")
+
+            campanha_id = int(rel.get('campanha_id') or 0)
+            campanha_obj, pergunta, stats_obj, linhas = _campanha_disparos_grid(
+                cursor,
+                tid=tid,
+                campanha_id=campanha_id,
+            )
+            titulo = str(rel.get('titulo') or f'Comprovante - Campanha {campanha_id}')
+            o = str(orientation or 'portrait').strip().lower()
+            if o not in ('portrait', 'landscape', 'retrato', 'paisagem', 'p', 'l'):
+                raise HTTPException(status_code=400, detail="Parâmetro orientation inválido")
+            pdf_bytes = _build_comprovante_pdf_bytes(
+                titulo=titulo,
+                campanha=campanha_obj,
+                pergunta=pergunta,
+                stats=stats_obj,
+                linhas=linhas,
+                orientation=o,
+            )
+            filename = f'comprovante_campanha_{campanha_id}_relatorio_{int(id)}.pdf'
+            headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+            return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/relatorios/comprovante")
+async def relatorios_comprovante(body: RelatorioComprovanteRequest, request: Request):
+    try:
+        user_info = _extract_user_from_auth(request)
+        tid = _tenant_id_from_header(request)
+        criado_por = user_info.get('nome') or user_info.get('email') or str(user_info.get('id', ''))
+        campanha_id = int(body.campanha_id)
+        with get_conn_for_request(request) as conn:
+            cursor = conn.cursor()
+            campanha_obj, pergunta, stats_obj, linhas = _campanha_disparos_grid(
+                cursor,
+                tid=tid,
+                campanha_id=campanha_id,
+            )
+            titulo = body.titulo or f'Comprovante - Campanha {campanha_id}'
+            parametros = {"campanha_id": campanha_id}
+            campanha_small = {
+                "id": campanha_obj.get("id"),
+                "nome": campanha_obj.get("nome"),
+                "descricao": campanha_obj.get("descricao"),
+                "cadastrante": campanha_obj.get("cadastrante"),
+                "criado_em": campanha_obj.get("criado_em"),
+                "data_inicio": campanha_obj.get("data_inicio"),
+                "data_fim": campanha_obj.get("data_fim"),
+            }
+            dados = {"campanha": campanha_small, "pergunta": pergunta, "stats": stats_obj, "linhas": linhas}
+
+            cursor.execute(
+                f"""
+                INSERT INTO "{DB_SCHEMA}"."Relatorios"
+                ("IdTenant","IdCampanha","Titulo","Tipo","Parametros","Dados","CriadoEm","CriadoPor")
+                VALUES (%s,%s,%s,%s,%s::jsonb,%s::jsonb,NOW(),%s)
+                RETURNING "IdRelatorio"
+                """,
+                (
+                    tid,
+                    campanha_id,
+                    titulo,
+                    'COMPROVANTE',
+                    json.dumps(_json_safe(parametros), ensure_ascii=False),
+                    json.dumps(_json_safe(dados), ensure_ascii=False),
+                    criado_por,
+                ),
+            )
+            new_id = int(cursor.fetchone()[0])
+            conn.commit()
+            return {"id": new_id, "dados": dados}
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== 5. CAMPANHAS ====================
@@ -2078,6 +3392,90 @@ def apply_migrations():
         except Exception as e:
             actions.append(f'Campanhas error: {str(e)}')
             pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Disparos" (
+                    "IdDisparo" SERIAL PRIMARY KEY,
+                    "IdTenant" INT,
+                    "IdCampanha" INT,
+                    "Canal" VARCHAR(40) DEFAULT 'WHATSAPP',
+                    "Direcao" VARCHAR(10) DEFAULT 'OUT',
+                    "Numero" VARCHAR(40),
+                    "Nome" VARCHAR(255),
+                    "Mensagem" TEXT,
+                    "Imagem" TEXT,
+                    "Status" VARCHAR(40),
+                    "DataHora" TIMESTAMP DEFAULT NOW(),
+                    "IdDisparoRef" INT,
+                    "RespostaClassificacao" VARCHAR(40),
+                    "Payload" JSONB
+                )
+                """
+            )
+            try:
+                cur.execute(f'CREATE INDEX IF NOT EXISTS "idx_disparos_tenant_datahora" ON "{DB_SCHEMA}"."Disparos" ("IdTenant", "DataHora" DESC)')
+            except Exception:
+                pass
+            try:
+                cur.execute(f'CREATE INDEX IF NOT EXISTS "idx_disparos_tenant_campanha_numero" ON "{DB_SCHEMA}"."Disparos" ("IdTenant", "IdCampanha", "Numero")')
+            except Exception:
+                pass
+            actions.append('Disparos ensured')
+        except Exception:
+            pass
+        try:
+            disparos_cols = [
+                ('"IdTenant"', 'INT'),
+                ('"IdCampanha"', 'INT'),
+                ('"Canal"', "VARCHAR(40) DEFAULT 'WHATSAPP'"),
+                ('"Direcao"', "VARCHAR(10) DEFAULT 'OUT'"),
+                ('"Numero"', 'VARCHAR(40)'),
+                ('"Nome"', 'VARCHAR(255)'),
+                ('"Mensagem"', 'TEXT'),
+                ('"Imagem"', 'TEXT'),
+                ('"Status"', 'VARCHAR(40)'),
+                ('"DataHora"', 'TIMESTAMP DEFAULT NOW()'),
+                ('"IdDisparoRef"', 'INT'),
+                ('"RespostaClassificacao"', 'VARCHAR(40)'),
+                ('"Payload"', 'JSONB'),
+            ]
+            for col_name, col_type in disparos_cols:
+                try:
+                    cur.execute(
+                        f"ALTER TABLE \"{DB_SCHEMA}\".\"Disparos\" ADD COLUMN IF NOT EXISTS {col_name} {col_type}"
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Relatorios" (
+                    "IdRelatorio" SERIAL PRIMARY KEY,
+                    "IdTenant" INT,
+                    "IdCampanha" INT,
+                    "Titulo" VARCHAR(255),
+                    "Tipo" VARCHAR(80),
+                    "Parametros" JSONB,
+                    "Dados" JSONB,
+                    "CriadoEm" TIMESTAMP DEFAULT NOW(),
+                    "CriadoPor" VARCHAR(255)
+                )
+                """
+            )
+            try:
+                cur.execute(f'CREATE INDEX IF NOT EXISTS "idx_relatorios_tenant_criadoem" ON "{DB_SCHEMA}"."Relatorios" ("IdTenant", "CriadoEm" DESC)')
+            except Exception:
+                pass
+            try:
+                cur.execute(f'CREATE INDEX IF NOT EXISTS "idx_relatorios_tenant_campanha" ON "{DB_SCHEMA}"."Relatorios" ("IdTenant", "IdCampanha")')
+            except Exception:
+                pass
+            actions.append('Relatorios ensured')
+        except Exception:
+            pass
             
     return actions
 
@@ -2385,6 +3783,90 @@ def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):
                 except Exception:
                     pass
             actions.append('Campanhas ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Disparos" (
+                    "IdDisparo" SERIAL PRIMARY KEY,
+                    "IdTenant" INT,
+                    "IdCampanha" INT,
+                    "Canal" VARCHAR(40) DEFAULT 'WHATSAPP',
+                    "Direcao" VARCHAR(10) DEFAULT 'OUT',
+                    "Numero" VARCHAR(40),
+                    "Nome" VARCHAR(255),
+                    "Mensagem" TEXT,
+                    "Imagem" TEXT,
+                    "Status" VARCHAR(40),
+                    "DataHora" TIMESTAMP DEFAULT NOW(),
+                    "IdDisparoRef" INT,
+                    "RespostaClassificacao" VARCHAR(40),
+                    "Payload" JSONB
+                )
+                """
+            )
+            try:
+                cur.execute(f'CREATE INDEX IF NOT EXISTS "idx_disparos_tenant_datahora" ON "{DB_SCHEMA}"."Disparos" ("IdTenant", "DataHora" DESC)')
+            except Exception:
+                pass
+            try:
+                cur.execute(f'CREATE INDEX IF NOT EXISTS "idx_disparos_tenant_campanha_numero" ON "{DB_SCHEMA}"."Disparos" ("IdTenant", "IdCampanha", "Numero")')
+            except Exception:
+                pass
+            actions.append('Disparos ensured (tenant DB)')
+        except Exception:
+            pass
+        try:
+            disparos_cols = [
+                ('"IdTenant"', 'INT'),
+                ('"IdCampanha"', 'INT'),
+                ('"Canal"', "VARCHAR(40) DEFAULT 'WHATSAPP'"),
+                ('"Direcao"', "VARCHAR(10) DEFAULT 'OUT'"),
+                ('"Numero"', 'VARCHAR(40)'),
+                ('"Nome"', 'VARCHAR(255)'),
+                ('"Mensagem"', 'TEXT'),
+                ('"Imagem"', 'TEXT'),
+                ('"Status"', 'VARCHAR(40)'),
+                ('"DataHora"', 'TIMESTAMP DEFAULT NOW()'),
+                ('"IdDisparoRef"', 'INT'),
+                ('"RespostaClassificacao"', 'VARCHAR(40)'),
+                ('"Payload"', 'JSONB'),
+            ]
+            for col_name, col_type in disparos_cols:
+                try:
+                    cur.execute(
+                        f"ALTER TABLE \"{DB_SCHEMA}\".\"Disparos\" ADD COLUMN IF NOT EXISTS {col_name} {col_type}"
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{DB_SCHEMA}"."Relatorios" (
+                    "IdRelatorio" SERIAL PRIMARY KEY,
+                    "IdTenant" INT,
+                    "IdCampanha" INT,
+                    "Titulo" VARCHAR(255),
+                    "Tipo" VARCHAR(80),
+                    "Parametros" JSONB,
+                    "Dados" JSONB,
+                    "CriadoEm" TIMESTAMP DEFAULT NOW(),
+                    "CriadoPor" VARCHAR(255)
+                )
+                """
+            )
+            try:
+                cur.execute(f'CREATE INDEX IF NOT EXISTS "idx_relatorios_tenant_criadoem" ON "{DB_SCHEMA}"."Relatorios" ("IdTenant", "CriadoEm" DESC)')
+            except Exception:
+                pass
+            try:
+                cur.execute(f'CREATE INDEX IF NOT EXISTS "idx_relatorios_tenant_campanha" ON "{DB_SCHEMA}"."Relatorios" ("IdTenant", "IdCampanha")')
+            except Exception:
+                pass
+            actions.append('Relatorios ensured (tenant DB)')
         except Exception:
             pass
         # Inserir usuário ADMIN padrão (tenant DB)
@@ -4678,17 +6160,22 @@ def _mask_key(k: str) -> str:
     return s[:6] + ("*" * (len(s) - 10)) + s[-4:]
 
 @app.get("/api/integracoes/evolution/key")
-async def integracoes_evolution_key():
-    val = os.getenv("AUTHENTICATION_API_KEY", "")
-    return {"hasKey": bool(val), "keyMasked": _mask_key(val)}
+async def integracoes_evolution_key(request: Request):
+    try:
+        with get_conn_for_request(request) as conn:
+            inst = _get_evolution_instance(conn, None)
+            val = str(inst.get("token") or "").strip() or str(os.getenv("AUTHENTICATION_API_KEY", "") or "").strip()
+            return {"hasKey": bool(val), "keyMasked": _mask_key(val), "evolution_api_id": inst["id"]}
+    except HTTPException as he:
+        return {"hasKey": False, "keyMasked": "", "error": he.detail}
 
 @app.get("/api/integracoes/evolution/test")
-async def integracoes_evolution_test():
+async def integracoes_evolution_test(request: Request, evolution_api_id: Optional[int] = None):
     try:
-        base = os.getenv("EVOLUTION_API_BASE", "http://evolution_api:4000")
-        key = os.getenv("AUTHENTICATION_API_KEY", "")
-        if not key:
-            raise HTTPException(status_code=400, detail="Chave não configurada")
+        with get_conn_for_request(request) as conn:
+            inst = _get_evolution_instance(conn, evolution_api_id)
+            base = _get_evolution_base_url(conn)
+        key = str(inst.get("token") or "").strip() or str(os.getenv("AUTHENTICATION_API_KEY", "") or "").strip()
         req = urllib.request.Request(
             url=base,
             headers={"apikey": key, "Accept": "application/json", "Accept-Encoding": "identity", "User-Agent": "CAPTAR/1.0"}

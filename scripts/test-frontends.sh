@@ -9,7 +9,8 @@ echo ""
 
 # Configurações das portas (padrões do docker-compose.yml)
 FRONTEND_PORT=${FRONTEND_HOST_PORT:-5501}
-EV_FRONTEND_PORT=${EV_FRONTEND_HOST_PORT:-4380}
+EV_API_PORT=${EV_API_HOST_PORT:-4400}
+EV_FRONTEND_PORT=${EV_FRONTEND_HOST_PORT:-4401}
 NGINX_PORT=5500
 
 # Verificar se os containers estão rodando
@@ -130,11 +131,18 @@ echo ""
 # Testar Evolution API
 echo "   --- Evolution API ---"
 if command -v curl &> /dev/null; then
-    evolution_api_response=$(curl -s --max-time 5 "http://localhost:$EV_FRONTEND_PORT/api/health" 2>/dev/null)
-    if [ $? -eq 0 ]; then
-        echo "   ✓ Evolution API: OK"
+    evolution_api_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:$EV_API_PORT/" 2>/dev/null)
+    if [ $? -eq 0 ] && [ "$evolution_api_status" != "000" ]; then
+        echo "   ✓ Evolution API (direto): OK (HTTP $evolution_api_status)"
     else
-        echo "   ✗ Evolution API não está respondendo"
+        echo "   ✗ Evolution API (direto) não está respondendo"
+    fi
+
+    evolution_api_proxy_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:$EV_FRONTEND_PORT/evo/" 2>/dev/null)
+    if [ $? -eq 0 ] && [ "$evolution_api_proxy_status" != "000" ]; then
+        echo "   ✓ Evolution API (via /evo/): OK (HTTP $evolution_api_proxy_status)"
+    else
+        echo "   ✗ Evolution API (via /evo/) não está respondendo"
     fi
 else
     echo "   ⚠ curl não encontrado, pulando teste de API"
@@ -192,4 +200,3 @@ else
     echo "✗ Alguns testes falharam. Verifique os logs acima."
     exit 1
 fi
-

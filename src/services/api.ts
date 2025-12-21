@@ -605,6 +605,11 @@ class ApiService {
     return response.data
   }
 
+  async resetCampanhaDisparos(id: number): Promise<{ deleted: number }> {
+    const response = await this.api.post(`/campanhas/${id}/reset-disparos`)
+    return response.data
+  }
+
   async deleteCampanha(id: number): Promise<any> {
     const response = await this.api.delete(`/campanhas/${id}`)
     return response.data
@@ -1111,6 +1116,16 @@ class ApiService {
 
   async createRelatorioComprovante(payload: { campanha_id: number; titulo?: string }): Promise<any> {
     const response = await this.api.post('/relatorios/comprovante', payload)
+    return response.data
+  }
+
+  async whatsappCheckNumbers(payload: { numbers: string[]; evolution_api_id?: string }): Promise<{ rows: { number: string; is_whatsapp: boolean; jid?: string | null }[]; instance?: string }> {
+    const response = await this.api.post('/integrations/whatsapp/whatsapp-numbers', payload)
+    return response.data
+  }
+
+  async whatsappPresenceCache(payload: { numbers: string[] }): Promise<{ rows: { number: string; presence?: string | null }[] }> {
+    const response = await this.api.post('/integrations/whatsapp/presence-cache', payload)
     return response.data
   }
 

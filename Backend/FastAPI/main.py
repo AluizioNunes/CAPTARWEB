@@ -612,6 +612,141 @@ class WhatsAppSendRequest(BaseModel):
     contato_nome: Optional[str] = None
     evolution_api_id: Optional[str] = None
 
+def _extract_evolution_message_id(payload: Any) -> str:
+    try:
+        if payload is None:
+            return ''
+        if isinstance(payload, str):
+            return payload.strip()
+        if isinstance(payload, dict):
+            for k in ('messageId', 'message_id', 'id'):
+                v = payload.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            key = payload.get('key')
+            if isinstance(key, dict):
+                v = key.get('id')
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            data = payload.get('data') or payload.get('payload')
+            if isinstance(data, dict):
+                for k in ('messageId', 'message_id', 'id'):
+                    v = data.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+                key2 = data.get('key')
+                if isinstance(key2, dict):
+                    v = key2.get('id')
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+        return ''
+    except Exception:
+        return ''
+
+def _extract_evolution_key_id(payload: Any) -> str:
+    try:
+        if payload is None:
+            return ''
+        if isinstance(payload, str):
+            return ''
+        if isinstance(payload, dict):
+            for k in ('keyId', 'key_id'):
+                v = payload.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            key = payload.get('key')
+            if isinstance(key, dict):
+                v = key.get('id')
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            data = payload.get('data') or payload.get('payload')
+            if isinstance(data, dict):
+                for k in ('keyId', 'key_id'):
+                    v = data.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+                key2 = data.get('key')
+                if isinstance(key2, dict):
+                    v = key2.get('id')
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+        return ''
+    except Exception:
+        return ''
+
+def _extract_evolution_status(payload: Any) -> Tuple[Optional[str], Optional[int]]:
+    try:
+        if payload is None:
+            return None, None
+        if isinstance(payload, dict):
+            data = payload.get('data') if isinstance(payload.get('data'), dict) else None
+            candidates = []
+            if data:
+                candidates.extend([data.get('status'), data.get('ack')])
+                msg = data.get('message')
+                if isinstance(msg, dict):
+                    candidates.extend([msg.get('status'), msg.get('ack')])
+            candidates.extend([payload.get('status'), payload.get('ack')])
+
+            for v in candidates:
+                if v is None:
+                    continue
+                if isinstance(v, (int, float)):
+                    ack = int(v)
+                    return None, ack
+                s = str(v or '').strip()
+                if not s:
+                    continue
+                if s.isdigit():
+                    return None, int(s)
+                return s.upper(), None
+        return None, None
+    except Exception:
+        return None, None
+
+def _extract_presence_status(payload: Any) -> Optional[str]:
+    try:
+        if payload is None or not isinstance(payload, dict):
+            return None
+        data = payload.get('data')
+        if not isinstance(data, dict):
+            data = payload
+        for k in ('lastKnownPresence', 'presence', 'state'):
+            v = data.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip().lower()
+        presences = data.get('presences')
+        if isinstance(presences, dict):
+            for _jid, p in presences.items():
+                if isinstance(p, dict):
+                    v = p.get('lastKnownPresence') or p.get('presence')
+                    if isinstance(v, str) and v.strip():
+                        return v.strip().lower()
+        return None
+    except Exception:
+        return None
+
+def _extract_from_me(payload: Any) -> Optional[bool]:
+    try:
+        if payload is None:
+            return None
+        if isinstance(payload, dict):
+            data = payload.get('data') or payload.get('event') or payload.get('payload')
+            if isinstance(data, dict):
+                key = data.get('key')
+                if isinstance(key, dict) and 'fromMe' in key:
+                    return bool(key.get('fromMe'))
+                if 'fromMe' in data:
+                    return bool(data.get('fromMe'))
+            key2 = payload.get('key')
+            if isinstance(key2, dict) and 'fromMe' in key2:
+                return bool(key2.get('fromMe'))
+            if 'fromMe' in payload:
+                return bool(payload.get('fromMe'))
+        return None
+    except Exception:
+        return None
+
 @app.post("/api/integrations/whatsapp/send")
 async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
     try:
@@ -690,14 +825,15 @@ async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
                                 raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp (Mídia): {text}")
                             resp_json = await resp_media.json()
                             try:
+                                message_id = _extract_evolution_message_id(resp_json) or None
                                 with get_conn_for_request(request) as conn_log:
                                     cursor_log = conn_log.cursor()
                                     tid_log = _tenant_id_from_header(request)
                                     cursor_log.execute(
                                         f"""
                                         INSERT INTO "{DB_SCHEMA}"."Disparos"
-                                        ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload")
-                                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW() AT TIME ZONE 'UTC',%s::jsonb)
+                                        ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload","MessageId","EvolutionInstance")
+                                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW() AT TIME ZONE 'UTC',%s::jsonb,%s,%s)
                                         """,
                                         (
                                             tid_log,
@@ -710,6 +846,8 @@ async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
                                             (final_media_url or None),
                                             'ENVIADO',
                                             json.dumps(resp_json, ensure_ascii=False),
+                                            message_id,
+                                            str(instance or '').strip() or None,
                                         ),
                                     )
                                     conn_log.commit()
@@ -736,14 +874,15 @@ async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
                                 raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp: {text}")
                             resp_json = await response.json()
                             try:
+                                message_id = _extract_evolution_message_id(resp_json) or None
                                 with get_conn_for_request(request) as conn_log:
                                     cursor_log = conn_log.cursor()
                                     tid_log = _tenant_id_from_header(request)
                                     cursor_log.execute(
                                         f"""
                                         INSERT INTO "{DB_SCHEMA}"."Disparos"
-                                        ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload")
-                                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW() AT TIME ZONE 'UTC',%s::jsonb)
+                                        ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload","MessageId","EvolutionInstance")
+                                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW() AT TIME ZONE 'UTC',%s::jsonb,%s,%s)
                                         """,
                                         (
                                             tid_log,
@@ -756,6 +895,8 @@ async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
                                             (final_media_url or None),
                                             'ENVIADO',
                                             json.dumps(resp_json, ensure_ascii=False),
+                                            message_id,
+                                            str(instance or '').strip() or None,
                                         ),
                                     )
                                     conn_log.commit()
@@ -779,14 +920,15 @@ async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
                             raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp: {text}")
                         resp_json = await response.json()
                         try:
+                            message_id = _extract_evolution_message_id(resp_json) or None
                             with get_conn_for_request(request) as conn_log:
                                 cursor_log = conn_log.cursor()
                                 tid_log = _tenant_id_from_header(request)
                                 cursor_log.execute(
                                     f"""
                                     INSERT INTO "{DB_SCHEMA}"."Disparos"
-                                    ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload")
-                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW() AT TIME ZONE 'UTC',%s::jsonb)
+                                    ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload","MessageId","EvolutionInstance")
+                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW() AT TIME ZONE 'UTC',%s::jsonb,%s,%s)
                                     """,
                                     (
                                         tid_log,
@@ -799,6 +941,8 @@ async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
                                         None,
                                         'ENVIADO',
                                         json.dumps(resp_json, ensure_ascii=False),
+                                        message_id,
+                                        str(instance or '').strip() or None,
                                     ),
                                 )
                                 conn_log.commit()
@@ -871,6 +1015,121 @@ async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
                 conn_log.commit()
         except Exception:
             pass
+        raise HTTPException(status_code=500, detail=str(e))
+
+class WhatsAppNumbersCheckRequest(BaseModel):
+    numbers: List[str]
+    evolution_api_id: Optional[str] = None
+
+@app.post("/api/integrations/whatsapp/whatsapp-numbers")
+async def whatsapp_check_numbers(payload: WhatsAppNumbersCheckRequest, request: Request):
+    try:
+        with get_conn_for_request(request) as conn:
+            evo = _get_evolution_instance(conn, payload.evolution_api_id)
+            base_url = _get_evolution_base_url(conn)
+        instance = evo["name"]
+        api_key = str(evo.get("token") or "").strip() or str(os.getenv("AUTHENTICATION_API_KEY", "") or "").strip()
+        if not api_key:
+            raise HTTPException(status_code=500, detail="Token da instância Evolution API não encontrado.")
+        base_candidates = _evolution_base_url_candidates(base_url)
+        if not base_candidates:
+            raise HTTPException(status_code=500, detail="Configuração da Evolution API incompleta no servidor.")
+
+        nums: List[str] = []
+        seen: set[str] = set()
+        for n in payload.numbers or []:
+            d = _digits_only(n)
+            if not d or d in seen:
+                continue
+            seen.add(d)
+            nums.append(d)
+        if not nums:
+            return {"rows": [], "instance": instance}
+
+        headers = {"apikey": api_key, "Content-Type": "application/json"}
+        last_err = None
+        async with aiohttp.ClientSession() as session:
+            for base_try in base_candidates:
+                try:
+                    url = f"{base_try}/chat/whatsappNumbers/{instance}"
+                    async with session.post(url, json={"numbers": nums}, headers=headers, timeout=30) as resp:
+                        raw = await resp.text()
+                        if resp.status not in (200, 201):
+                            code = resp.status if resp.status < 500 else 502
+                            raise HTTPException(status_code=code, detail=f"Erro na Evolution API: {raw}")
+                        try:
+                            data = json.loads(raw) if raw else {}
+                        except Exception:
+                            data = {}
+                        items = []
+                        if isinstance(data, list):
+                            items = data
+                        elif isinstance(data, dict):
+                            dd = data.get("data")
+                            if isinstance(dd, list):
+                                items = dd
+                            else:
+                                items = [data]
+                        out_rows: List[Dict[str, Any]] = []
+                        for idx, it in enumerate(items):
+                            if not isinstance(it, dict):
+                                continue
+                            num = _digits_only(it.get("number") or it.get("remoteJid") or it.get("jid") or it.get("jidOptions") or it.get("id") or "")
+                            if not num and idx < len(nums):
+                                num = nums[idx]
+                            exists = it.get("exists")
+                            if exists is None:
+                                exists = it.get("isWhatsapp")
+                            out_rows.append(
+                                {
+                                    "number": num,
+                                    "is_whatsapp": bool(exists),
+                                    "jid": str(it.get("jid") or it.get("remoteJid") or "") or None,
+                                }
+                            )
+                        return {"rows": out_rows, "instance": instance}
+                except HTTPException:
+                    raise
+                except (aiohttp.ClientConnectorError, aiohttp.ClientConnectionError, asyncio.TimeoutError, OSError) as ce:
+                    last_err = ce
+                    continue
+        if last_err:
+            raise HTTPException(status_code=502, detail=f"Falha ao conectar na Evolution API. BaseUrl={base_url}. Tentativas={base_candidates}. Erro={str(last_err)}")
+        raise HTTPException(status_code=502, detail="Falha ao consultar números do WhatsApp.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class WhatsAppPresenceCacheRequest(BaseModel):
+    numbers: List[str]
+
+@app.post("/api/integrations/whatsapp/presence-cache")
+async def whatsapp_presence_cache(payload: WhatsAppPresenceCacheRequest, request: Request):
+    try:
+        tid = _tenant_id_from_header(request)
+        try:
+            rc = get_redis_client()
+        except Exception:
+            rc = None
+        out_rows: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for n in payload.numbers or []:
+            d = _digits_only(n)
+            if not d or d in seen:
+                continue
+            seen.add(d)
+            pres = None
+            if rc:
+                try:
+                    v = rc.get(f"wa:presence:{tid}:{d}")
+                    if v is not None:
+                        pres = (v.decode("utf-8") if hasattr(v, "decode") else str(v)).strip() or None
+                except Exception:
+                    pres = None
+            out_rows.append({"number": d, "presence": pres})
+        return {"rows": out_rows}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 def _digits_only(s: Any) -> str:
@@ -1125,6 +1384,8 @@ def _campanha_disparos_grid(
             "nome": str(c.get('nome') or '').strip() or '—',
             "envio_datahora": None,
             "envio_status": None,
+            "entregue_em": None,
+            "visualizado_em": None,
             "resposta_datahora": None,
             "resposta_classificacao": None,
             "resposta_texto": None,
@@ -1202,7 +1463,20 @@ def _campanha_disparos_grid(
                "Status" as status,
                "DataHora" as datahora,
                "Mensagem" as mensagem,
-               "RespostaClassificacao" as resposta
+               "RespostaClassificacao" as resposta,
+               "EntregueEm" as entregue_em,
+               "VisualizadoEm" as visualizado_em,
+               COALESCE(
+                 NULLIF("MessageId",''),
+                 NULLIF("Payload"->>'keyId',''),
+                 NULLIF("Payload"->'key'->>'id',''),
+                 NULLIF("Payload"->'data'->>'keyId',''),
+                 NULLIF("Payload"->'data'->'key'->>'id',''),
+                 NULLIF("Payload"->>'messageId',''),
+                 NULLIF("Payload"->'data'->>'messageId',''),
+                 NULLIF("Payload"->>'id',''),
+                 NULLIF("Payload"->'data'->>'id','')
+               ) as message_id
         FROM "{DB_SCHEMA}"."Disparos"
         WHERE "IdTenant" = %s AND "IdCampanha" = %s
         ORDER BY "IdDisparo" ASC
@@ -1212,6 +1486,163 @@ def _campanha_disparos_grid(
     )
     disp_rows = cursor.fetchall()
     disp_cols = [d[0] for d in cursor.description]
+
+    delivered_ts: Dict[str, datetime] = {}
+    read_ts: Dict[str, datetime] = {}
+    try:
+        msg_ids_needed: List[str] = []
+        seen_mid: set[str] = set()
+        for r in disp_rows or []:
+            d0 = dict(zip(disp_cols, r))
+            if str(d0.get('direcao') or '').upper() != 'OUT':
+                continue
+            mid = str(d0.get('message_id') or '').strip()
+            if not mid:
+                continue
+            if d0.get('entregue_em') is not None and d0.get('visualizado_em') is not None:
+                continue
+            if mid in seen_mid:
+                continue
+            seen_mid.add(mid)
+            msg_ids_needed.append(mid)
+
+        if msg_ids_needed:
+            cursor.execute(
+                """
+                SELECT "keyId", "messageId", status, COALESCE("updatedAt","createdAt") as ts
+                FROM "EvolutionAPI"."MessageUpdate"
+                WHERE status IN ('DELIVERY_ACK','READ')
+                  AND ("keyId" = ANY(%s) OR "messageId" = ANY(%s))
+                """,
+                (msg_ids_needed, msg_ids_needed),
+            )
+            for key_id, message_id, st, ts in cursor.fetchall() or []:
+                s = str(st or '').upper()
+                if s not in ('DELIVERY_ACK', 'READ'):
+                    continue
+                ts_dt = _to_utc_naive(ts) if isinstance(ts, datetime) else None
+                if not ts_dt:
+                    continue
+
+                ids: List[str] = []
+                if isinstance(key_id, str) and key_id.strip() and key_id.strip() in seen_mid:
+                    ids.append(key_id.strip())
+                if isinstance(message_id, str) and message_id.strip() and message_id.strip() in seen_mid:
+                    ids.append(message_id.strip())
+
+                for mid in ids:
+                    if s == 'DELIVERY_ACK':
+                        prev = delivered_ts.get(mid)
+                        if prev is None or ts_dt < prev:
+                            delivered_ts[mid] = ts_dt
+                    elif s == 'READ':
+                        prev_r = read_ts.get(mid)
+                        if prev_r is None or ts_dt < prev_r:
+                            read_ts[mid] = ts_dt
+
+            if delivered_ts or read_ts:
+                read_list = list(sorted(read_ts.keys()))
+                delivered_only = list(sorted(set(delivered_ts.keys()) - set(read_ts.keys())))
+                if read_list:
+                    read_times = [read_ts.get(x) for x in read_list]
+                    delivered_times_for_read = [delivered_ts.get(x) for x in read_list]
+                    cursor.execute(
+                        f"""
+                        WITH upd AS (
+                          SELECT * FROM UNNEST(%s::text[], %s::timestamp[], %s::timestamp[]) AS t(message_id, read_ts, delivered_ts)
+                        )
+                        UPDATE "{DB_SCHEMA}"."Disparos" d
+                        SET "EntregueEm" = CASE
+                              WHEN d."EntregueEm" IS NULL THEN COALESCE(upd.delivered_ts, upd.read_ts)
+                              WHEN d."EntregueEm" = d."VisualizadoEm" AND upd.delivered_ts IS NOT NULL AND upd.delivered_ts <> d."EntregueEm" THEN upd.delivered_ts
+                              ELSE d."EntregueEm"
+                            END,
+                            "VisualizadoEm" = CASE
+                              WHEN d."VisualizadoEm" IS NULL THEN upd.read_ts
+                              WHEN d."EntregueEm" IS NOT NULL AND d."VisualizadoEm" = d."EntregueEm" AND upd.read_ts IS NOT NULL AND upd.read_ts <> d."VisualizadoEm" THEN upd.read_ts
+                              ELSE d."VisualizadoEm"
+                            END,
+                            "MessageId" = CASE
+                              WHEN d."MessageId" IS NULL OR d."MessageId" = '' THEN upd.message_id
+                              ELSE d."MessageId"
+                            END,
+                            "Status" = CASE
+                              WHEN UPPER(COALESCE(d."Status", '')) = 'FALHA' THEN d."Status"
+                              WHEN UPPER(COALESCE(d."Status", '')) = 'VISUALIZADO' THEN d."Status"
+                              ELSE 'VISUALIZADO'
+                            END
+                        FROM upd
+                        WHERE d."IdTenant" = %s
+                          AND d."Canal" = 'WHATSAPP'
+                          AND d."Direcao" = 'OUT'
+                          AND (
+                            d."MessageId" = upd.message_id
+                            OR COALESCE(
+                              NULLIF(d."Payload"->>'keyId',''),
+                              NULLIF(d."Payload"->'key'->>'id',''),
+                              NULLIF(d."Payload"->'data'->>'keyId',''),
+                              NULLIF(d."Payload"->'data'->'key'->>'id',''),
+                              NULLIF(d."Payload"->>'messageId',''),
+                              NULLIF(d."Payload"->'data'->>'messageId',''),
+                              NULLIF(d."Payload"->>'id',''),
+                              NULLIF(d."Payload"->'data'->>'id','')
+                            ) = upd.message_id
+                          )
+                        """,
+                        (read_list, read_times, delivered_times_for_read, int(tid)),
+                    )
+                if delivered_only:
+                    delivered_times = [delivered_ts.get(x) for x in delivered_only]
+                    cursor.execute(
+                        f"""
+                        WITH upd AS (
+                          SELECT * FROM UNNEST(%s::text[], %s::timestamp[]) AS t(message_id, delivered_ts)
+                        )
+                        UPDATE "{DB_SCHEMA}"."Disparos" d
+                        SET "EntregueEm" = CASE
+                              WHEN d."EntregueEm" IS NULL THEN upd.delivered_ts
+                              WHEN d."EntregueEm" = d."VisualizadoEm" AND upd.delivered_ts IS NOT NULL AND upd.delivered_ts <> d."EntregueEm" THEN upd.delivered_ts
+                              ELSE d."EntregueEm"
+                            END,
+                            "MessageId" = CASE
+                              WHEN d."MessageId" IS NULL OR d."MessageId" = '' THEN upd.message_id
+                              ELSE d."MessageId"
+                            END,
+                            "Status" = CASE
+                              WHEN UPPER(COALESCE(d."Status", '')) = 'FALHA' THEN d."Status"
+                              WHEN UPPER(COALESCE(d."Status", '')) IN ('VISUALIZADO','ENTREGUE') THEN d."Status"
+                              ELSE 'ENTREGUE'
+                            END
+                        FROM upd
+                        WHERE d."IdTenant" = %s
+                          AND d."Canal" = 'WHATSAPP'
+                          AND d."Direcao" = 'OUT'
+                          AND (
+                            d."MessageId" = upd.message_id
+                            OR COALESCE(
+                              NULLIF(d."Payload"->>'keyId',''),
+                              NULLIF(d."Payload"->'key'->>'id',''),
+                              NULLIF(d."Payload"->'data'->>'keyId',''),
+                              NULLIF(d."Payload"->'data'->'key'->>'id',''),
+                              NULLIF(d."Payload"->>'messageId',''),
+                              NULLIF(d."Payload"->'data'->>'messageId',''),
+                              NULLIF(d."Payload"->>'id',''),
+                              NULLIF(d."Payload"->'data'->>'id','')
+                            ) = upd.message_id
+                          )
+                        """,
+                        (delivered_only, delivered_times, int(tid)),
+                    )
+                try:
+                    cursor.connection.commit()
+                except Exception:
+                    pass
+    except Exception:
+        try:
+            cursor.connection.rollback()
+        except Exception:
+            pass
+
     for r in disp_rows or []:
         d = dict(zip(disp_cols, r))
         numero = _digits_only(d.get('numero'))
@@ -1235,12 +1666,59 @@ def _campanha_disparos_grid(
             if (cur_dt is None) or (isinstance(datahora, datetime) and isinstance(cur_dt, datetime) and datahora >= cur_dt) or (cur_dt is None and datahora):
                 ent['envio_datahora'] = datahora
                 ent['envio_status'] = status or '—'
+            d_ent = d.get('entregue_em')
+            if isinstance(d_ent, datetime):
+                d_ent = _to_utc_naive(d_ent)
+            d_vis = d.get('visualizado_em')
+            if isinstance(d_vis, datetime):
+                d_vis = _to_utc_naive(d_vis)
+            mid = str(d.get('message_id') or '').strip()
+            if mid:
+                rts = read_ts.get(mid)
+                dts = delivered_ts.get(mid)
+                if d_vis is None and rts is not None:
+                    d_vis = rts
+                if d_ent is None:
+                    if dts is not None:
+                        d_ent = dts
+                    elif rts is not None:
+                        d_ent = rts
+                if d_vis is not None and d_ent is not None and d_vis == d_ent and rts is not None and rts != d_vis:
+                    d_vis = rts
+                if d_vis is not None and d_ent is not None and d_vis == d_ent and dts is not None and dts != d_ent:
+                    d_ent = dts
+            cur_ent = ent.get('entregue_em')
+            cur_vis0 = ent.get('visualizado_em')
+            if cur_ent is None and d_ent:
+                ent['entregue_em'] = d_ent
+            elif cur_ent and cur_vis0 and cur_ent == cur_vis0 and d_ent and d_ent != cur_ent:
+                ent['entregue_em'] = d_ent
+            cur_vis = ent.get('visualizado_em')
+            if cur_vis is None and d_vis:
+                ent['visualizado_em'] = d_vis
+            try:
+                cur_status = str(ent.get('envio_status') or '').upper()
+                if cur_status != 'FALHA':
+                    if ent.get('visualizado_em'):
+                        ent['envio_status'] = 'VISUALIZADO'
+                    elif ent.get('entregue_em'):
+                        ent['envio_status'] = 'ENTREGUE'
+            except Exception:
+                pass
         elif direcao == 'IN':
             cur_dt = ent.get('resposta_datahora')
             if (cur_dt is None) or (isinstance(datahora, datetime) and isinstance(cur_dt, datetime) and datahora >= cur_dt) or (cur_dt is None and datahora):
                 ent['resposta_datahora'] = datahora
                 ent['resposta_classificacao'] = _normalize_resposta_classificacao(resposta)
                 ent['resposta_texto'] = mensagem
+            try:
+                vis = ent.get('visualizado_em')
+                entg = ent.get('entregue_em')
+                resp_dt = ent.get('resposta_datahora')
+                if resp_dt and vis and resp_dt < vis and (entg is None or vis == entg):
+                    ent['visualizado_em'] = resp_dt
+            except Exception:
+                pass
 
     linhas: List[Dict[str, Any]] = []
     for ent in by_num.values():
@@ -1261,14 +1739,20 @@ def _campanha_disparos_grid(
     positivos = 0
     negativos = 0
     aguardando = 0
+    entregues = 0
+    visualizados = 0
     for it in linhas:
         envio_status = str(it.get('envio_status') or '').upper()
-        if envio_status == 'ENVIADO':
+        if envio_status in ('ENVIADO', 'ENTREGUE', 'VISUALIZADO', 'LIDO', 'READ'):
             enviados += 1
         if envio_status == 'FALHA':
             falhas += 1
         if it.get('resposta_datahora'):
             respostas_qtd += 1
+        if it.get('entregue_em'):
+            entregues += 1
+        if it.get('visualizado_em'):
+            visualizados += 1
         rc = _normalize_resposta_classificacao(it.get('resposta_classificacao'))
         if rc == 'POSITIVO':
             positivos += 1
@@ -1280,6 +1764,8 @@ def _campanha_disparos_grid(
     stats_obj = {
         "enviados": enviados,
         "falhas": falhas,
+        "entregues": entregues,
+        "visualizados": visualizados,
         "respostas": respostas_qtd,
         "positivos": positivos,
         "negativos": negativos,
@@ -1609,34 +2095,35 @@ def _build_comprovante_pdf_bytes(
     elements: List[Any] = []
     elements.append(Spacer(1, 2))
 
-    header = [
-        'NOME',
-        'NÚMERO',
-        'ENVIO (DATA/HORA)',
-        'STATUS ENVIO',
-        'RESPOSTA',
-        'RESPOSTA (DATA/HORA)',
-    ]
+    anexo_obj_pdf = _safe_json_obj(campanha.get('anexo_json')) if isinstance(campanha, dict) else None
+    cfg_pdf = (anexo_obj_pdf.get('config') if isinstance(anexo_obj_pdf, dict) else None) if isinstance(anexo_obj_pdf, dict) else None
+    aguardar_respostas_pdf = str((cfg_pdf or {}).get('response_mode') or '').strip().upper() == 'SIM_NAO' if isinstance(cfg_pdf, dict) else False
+
+    header = ['NOME', 'NÚMERO', 'ENVIO (DATA/HORA)', 'STATUS ENVIO', 'ENTREGUE', 'VISUALIZADO']
+    if aguardar_respostas_pdf:
+        header.extend(['RESPOSTA', 'RESPOSTA (DATA/HORA)'])
     data_rows: List[List[Any]] = [header]
     for it in linhas:
-        data_rows.append([
+        row = [
             Paragraph(_truncate_text(it.get('nome') or '—', 60) or '—', style_normal),
             Paragraph(_truncate_text(it.get('numero') or '', 30) or '—', style_normal),
             Paragraph(_format_dt_br(it.get('envio_datahora') or ''), style_normal),
             Paragraph(str(it.get('envio_status') or '—').upper(), style_normal),
-            Paragraph(str(it.get('resposta_classificacao') or '—').upper(), style_normal),
-            Paragraph(_format_dt_br(it.get('resposta_datahora') or ''), style_normal),
-        ])
+            Paragraph(_format_dt_br(it.get('entregue_em') or ''), style_normal),
+            Paragraph(_format_dt_br(it.get('visualizado_em') or ''), style_normal),
+        ]
+        if aguardar_respostas_pdf:
+            row.extend([
+                Paragraph(str(it.get('resposta_classificacao') or '—').upper(), style_normal),
+                Paragraph(_format_dt_br(it.get('resposta_datahora') or ''), style_normal),
+            ])
+        data_rows.append(row)
 
     avail_w = float(getattr(doc, 'width', 0.0) or 0.0)
-    col_widths = [
-        avail_w * 0.26,
-        avail_w * 0.16,
-        avail_w * 0.17,
-        avail_w * 0.11,
-        avail_w * 0.11,
-        avail_w * 0.19,
-    ]
+    if aguardar_respostas_pdf:
+        col_widths = [avail_w * 0.22, avail_w * 0.14, avail_w * 0.12, avail_w * 0.10, avail_w * 0.12, avail_w * 0.12, avail_w * 0.08, avail_w * 0.10]
+    else:
+        col_widths = [avail_w * 0.28, avail_w * 0.16, avail_w * 0.18, avail_w * 0.12, avail_w * 0.13, avail_w * 0.13]
     table = Table(data_rows, colWidths=col_widths, repeatRows=1)
     table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1f2937')),
@@ -1808,6 +2295,8 @@ def _iter_evolution_events(payload: Any) -> List[Dict[str, Any]]:
             return []
 
         data = payload.get('data') or payload.get('event') or payload.get('payload')
+        if isinstance(data, list) and data:
+            return [x for x in data if isinstance(x, dict)]
         if isinstance(data, dict):
             msgs = data.get('messages')
             if isinstance(msgs, list) and msgs:
@@ -1947,6 +2436,103 @@ async def whatsapp_webhook(payload: Dict[str, Any], request: Request, tenant: Op
             if not events:
                 return {"ok": True, "ignored": True, "reason": "no_events"}
 
+            try:
+                rc2 = get_redis_client()
+            except Exception:
+                rc2 = None
+
+            receipts_updated = 0
+            presence_updated = 0
+            for ev in events:
+                try:
+                    pres = _extract_presence_status(ev)
+                    num_pres = _extract_evolution_number(ev)
+                    if pres and num_pres and rc2:
+                        rc2.setex(f"wa:presence:{tid}:{_digits_only(num_pres)}", 86400, str(pres))
+                        presence_updated += 1
+                except Exception:
+                    pass
+
+                try:
+                    from_me = _extract_from_me(ev)
+                    msg_id = _extract_evolution_message_id(ev)
+                    key_id = _extract_evolution_key_id(ev)
+                    status_str, ack = _extract_evolution_status(ev)
+                    ids: List[str] = []
+                    for x in (key_id, msg_id):
+                        if isinstance(x, str) and x.strip() and x.strip() not in ids:
+                            ids.append(x.strip())
+                    if not ids or from_me is False:
+                        continue
+                    dt_ev = _extract_evolution_datetime(ev) or datetime.utcnow()
+                    delivered = False
+                    seen = False
+                    if ack is not None:
+                        delivered = ack >= 2
+                        seen = ack >= 3
+                    if status_str:
+                        ss = str(status_str).upper()
+                        if 'DELIVER' in ss or 'RECEIV' in ss:
+                            delivered = True
+                        if 'READ' in ss or 'SEEN' in ss or 'VISUAL' in ss:
+                            delivered = True
+                            seen = True
+                    if not delivered and not seen:
+                        continue
+                    delivered_dt = dt_ev if delivered else None
+                    seen_dt = dt_ev if seen else None
+                    next_status = None
+                    if seen:
+                        next_status = 'VISUALIZADO'
+                    elif delivered:
+                        next_status = 'ENTREGUE'
+                    cursor.execute(
+                        f"""
+                        UPDATE "{DB_SCHEMA}"."Disparos"
+                        SET "EntregueEm" = CASE
+                              WHEN %s IS NULL THEN "EntregueEm"
+                              WHEN "EntregueEm" IS NULL OR "EntregueEm" < %s THEN %s
+                              ELSE "EntregueEm"
+                            END,
+                            "VisualizadoEm" = CASE
+                              WHEN %s IS NULL THEN "VisualizadoEm"
+                              WHEN "VisualizadoEm" IS NULL OR "VisualizadoEm" < %s THEN %s
+                              ELSE "VisualizadoEm"
+                            END,
+                            "Status" = CASE
+                              WHEN %s IS NULL THEN "Status"
+                              WHEN UPPER(COALESCE("Status", '')) = 'FALHA' THEN "Status"
+                              WHEN UPPER(COALESCE("Status", '')) = 'VISUALIZADO' THEN "Status"
+                              ELSE %s
+                            END
+                        WHERE "IdTenant" = %s
+                          AND "Canal" = 'WHATSAPP'
+                          AND "Direcao" = 'OUT'
+                          AND (
+                            "MessageId" = ANY(%s)
+                            OR COALESCE(
+                              NULLIF("Payload"->>'keyId',''),
+                              NULLIF("Payload"->'key'->>'id',''),
+                              NULLIF("Payload"->'data'->>'keyId',''),
+                              NULLIF("Payload"->'data'->'key'->>'id',''),
+                              NULLIF("Payload"->>'messageId',''),
+                              NULLIF("Payload"->'data'->>'messageId',''),
+                              NULLIF("Payload"->>'id',''),
+                              NULLIF("Payload"->'data'->>'id','')
+                            ) = ANY(%s)
+                          )
+                        """,
+                        (delivered_dt, delivered_dt, delivered_dt, seen_dt, seen_dt, seen_dt, next_status, next_status, tid, ids, ids),
+                    )
+                    if cursor.rowcount:
+                        receipts_updated += int(cursor.rowcount or 0)
+                        conn.commit()
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+
             cursor.execute(
                 f"""
                 SELECT d."IdDisparo", d."Numero", d."IdCampanha"
@@ -1957,7 +2543,7 @@ async def whatsapp_webhook(payload: Dict[str, Any], request: Request, tenant: Op
                 WHERE d."IdTenant" = %s
                   AND d."Canal" = 'WHATSAPP'
                   AND d."Direcao" = 'OUT'
-                  AND d."Status" = 'ENVIADO'
+                  AND d."Status" IN ('ENVIADO','ENTREGUE','VISUALIZADO')
                   AND d."IdCampanha" IS NOT NULL
                   AND COALESCE(c."AnexoJSON"->'config'->>'response_mode', '') = 'SIM_NAO'
                 ORDER BY d."DataHora" DESC, d."IdDisparo" DESC
@@ -2160,6 +2746,8 @@ async def whatsapp_webhook(payload: Dict[str, Any], request: Request, tenant: Op
                 "ok": True,
                 "tenant": slug,
                 "processed": len(events),
+                "receipts_updated": receipts_updated,
+                "presence_updated": presence_updated,
                 "updated": updated,
                 "ignored": ignored,
             }
@@ -2232,7 +2820,7 @@ async def campanhas_disparos_grid(id: int, request: Request, limit_contacts: int
                 campanha_id=int(id),
                 limit_contacts=int(limit_contacts),
             )
-            cols = ["nome", "numero", "envio_datahora", "envio_status", "resposta_classificacao", "resposta_datahora", "resposta_texto"]
+            cols = ["nome", "numero", "envio_datahora", "envio_status", "entregue_em", "visualizado_em", "resposta_classificacao", "resposta_datahora", "resposta_texto"]
             return {"campanha": campanha_obj, "pergunta": pergunta, "stats": stats_obj, "rows": linhas, "columns": cols}
     except HTTPException:
         raise
@@ -2731,6 +3319,25 @@ async def campanhas_update(id: int, campanha: CampanhaUpdate, request: Request):
             return {"id": id, "message": "Campanha atualizada com sucesso"}
     except Exception as e:
         print(f"Error updating campanha: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/campanhas/{id}/reset-disparos")
+async def campanhas_reset_disparos(id: int, request: Request):
+    try:
+        tid = _tenant_id_from_header(request)
+        with get_conn_for_request(request) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                DELETE FROM "{DB_SCHEMA}"."Disparos"
+                WHERE "IdTenant" = %s AND "IdCampanha" = %s AND "Canal" = 'WHATSAPP'
+                """,
+                (int(tid), int(id)),
+            )
+            deleted = cursor.rowcount or 0
+            conn.commit()
+            return {"deleted": int(deleted)}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/campanhas/{id}")
@@ -3639,7 +4246,11 @@ def apply_migrations():
                     "DataHora" TIMESTAMP DEFAULT NOW(),
                     "IdDisparoRef" INT,
                     "RespostaClassificacao" VARCHAR(40),
-                    "Payload" JSONB
+                    "Payload" JSONB,
+                    "MessageId" TEXT,
+                    "EvolutionInstance" TEXT,
+                    "EntregueEm" TIMESTAMP,
+                    "VisualizadoEm" TIMESTAMP
                 )
                 """
             )
@@ -3649,6 +4260,10 @@ def apply_migrations():
                 pass
             try:
                 cur.execute(f'CREATE INDEX IF NOT EXISTS "idx_disparos_tenant_campanha_numero" ON "{DB_SCHEMA}"."Disparos" ("IdTenant", "IdCampanha", "Numero")')
+            except Exception:
+                pass
+            try:
+                cur.execute(f'CREATE INDEX IF NOT EXISTS "idx_disparos_tenant_messageid" ON "{DB_SCHEMA}"."Disparos" ("IdTenant", "MessageId")')
             except Exception:
                 pass
             actions.append('Disparos ensured')
@@ -3669,6 +4284,10 @@ def apply_migrations():
                 ('"IdDisparoRef"', 'INT'),
                 ('"RespostaClassificacao"', 'VARCHAR(40)'),
                 ('"Payload"', 'JSONB'),
+                ('"MessageId"', 'TEXT'),
+                ('"EvolutionInstance"', 'TEXT'),
+                ('"EntregueEm"', 'TIMESTAMP'),
+                ('"VisualizadoEm"', 'TIMESTAMP'),
             ]
             for col_name, col_type in disparos_cols:
                 try:
@@ -4032,7 +4651,11 @@ def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):
                     "DataHora" TIMESTAMP DEFAULT NOW(),
                     "IdDisparoRef" INT,
                     "RespostaClassificacao" VARCHAR(40),
-                    "Payload" JSONB
+                    "Payload" JSONB,
+                    "MessageId" TEXT,
+                    "EvolutionInstance" TEXT,
+                    "EntregueEm" TIMESTAMP,
+                    "VisualizadoEm" TIMESTAMP
                 )
                 """
             )
@@ -4042,6 +4665,10 @@ def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):
                 pass
             try:
                 cur.execute(f'CREATE INDEX IF NOT EXISTS "idx_disparos_tenant_campanha_numero" ON "{DB_SCHEMA}"."Disparos" ("IdTenant", "IdCampanha", "Numero")')
+            except Exception:
+                pass
+            try:
+                cur.execute(f'CREATE INDEX IF NOT EXISTS "idx_disparos_tenant_messageid" ON "{DB_SCHEMA}\".\"Disparos\" (\"IdTenant\", \"MessageId\")')
             except Exception:
                 pass
             actions.append('Disparos ensured (tenant DB)')
@@ -4062,6 +4689,10 @@ def apply_migrations_dsn(dsn: str, slug: Optional[str] = None):
                 ('"IdDisparoRef"', 'INT'),
                 ('"RespostaClassificacao"', 'VARCHAR(40)'),
                 ('"Payload"', 'JSONB'),
+                ('"MessageId"', 'TEXT'),
+                ('"EvolutionInstance"', 'TEXT'),
+                ('"EntregueEm"', 'TIMESTAMP'),
+                ('"VisualizadoEm"', 'TIMESTAMP'),
             ]
             for col_name, col_type in disparos_cols:
                 try:

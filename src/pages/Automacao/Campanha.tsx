@@ -62,7 +62,38 @@ export default function Campanha() {
       }
     } catch {}
     return {}
-  }, [selectedCampanha?.id, selectedCampanha?.conteudo_arquivo])
+  }, [api, selectedCampanha?.id, selectedCampanha?.conteudo_arquivo])
+
+  const eventLogsKey = useMemo(() => {
+    if (!selectedCampanha?.id) return null
+    const u = String((user as any)?.usuario || 'default')
+    return `campanhas.eventLogs.${u}.${Number(selectedCampanha.id)}`
+  }, [selectedCampanha?.id, (user as any)?.usuario])
+
+  useEffect(() => {
+    if (!eventLogsKey) {
+      setEventLogs([])
+      return
+    }
+    try {
+      const raw = localStorage.getItem(eventLogsKey)
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) {
+          setEventLogs(parsed.map((x: any) => String(x)))
+          return
+        }
+      }
+    } catch {}
+    setEventLogs([`[${dayjs().format('HH:mm:ss')}] Sistema pronto. Aguardando início do disparo.`])
+  }, [eventLogsKey])
+
+  useEffect(() => {
+    if (!eventLogsKey) return
+    try {
+      localStorage.setItem(eventLogsKey, JSON.stringify((eventLogs || []).slice(-2000)))
+    } catch {}
+  }, [eventLogsKey, eventLogs])
 
   const loadEvolutionInstances = useCallback(async () => {
     try {
@@ -109,9 +140,6 @@ export default function Campanha() {
   // Handle selection change and load real data
   useEffect(() => {
     if (selectedCampanha) {
-        // Reset logs
-        setEventLogs([`[${dayjs().format('HH:mm:ss')}] Sistema pronto. Aguardando início do disparo.`])
-        
         let contacts: any[] = []
 
         const parseResposta = (v: any) => {
@@ -126,13 +154,26 @@ export default function Campanha() {
             return null
         }
 
-        // Helper to find key case-insensitive
+        const parseBool = (v: any): boolean | null => {
+            if (v === true || v === false) return v
+            const s = String(v ?? '').trim().toLowerCase()
+            if (!s) return null
+            if (s === 'true' || s === '1' || s === 'sim' || s === 's' || s === 'valido' || s === 'válido') return true
+            if (s === 'false' || s === '0' || s === 'nao' || s === 'não' || s === 'n' || s === 'invalido' || s === 'inválido') return false
+            return null
+        }
+
         const findVal = (obj: any, keys: string[]) => {
             if (!obj) return ''
             const objKeys = Object.keys(obj)
             for (const k of keys) {
                 const found = objKeys.find(ok => ok.trim().toLowerCase() === k.trim().toLowerCase())
-                if (found && obj[found]) return obj[found]
+                if (found) {
+                    const val = obj[found]
+                    if (val === undefined || val === null) continue
+                    if (typeof val === 'string' && !val.trim()) continue
+                    return val
+                }
             }
             return ''
         }
@@ -155,6 +196,8 @@ export default function Campanha() {
                         const name = findVal(row, ['nome', 'name', 'cliente', 'full_name', 'fullname']) || `Contato ${idx + 1}`
                         const respRaw = findVal(row, ['resposta', 'response', 'respondido', 'reply'])
                         const resposta = parseResposta(respRaw)
+                        const isWhatsapp = parseBool(findVal(row, ['is_whatsapp', 'isWhatsapp', 'whatsapp_valido', 'whatsappValido']))
+                        const whatsappJid = findVal(row, ['whatsapp_jid', 'whatsappJid', 'jid'])
                         
                         return {
                             id: idx,
@@ -162,6 +205,8 @@ export default function Campanha() {
                             whatsapp: phone,
                             status: row.status || 'waiting',
                             resposta,
+                            is_whatsapp: isWhatsapp === null ? undefined : isWhatsapp,
+                            whatsapp_jid: whatsappJid ? String(whatsappJid) : undefined,
                             original: row
                         }
                     }).filter(c => c.whatsapp) // Filter out those without phone
@@ -184,12 +229,67 @@ export default function Campanha() {
              setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] AVISO: Nenhum contato válido encontrado no arquivo.`])
         }
 
-        setContactStatuses(contacts);
+        setContactStatuses(contacts)
+
+        let cancelled = false
+        ;(async () => {
+            try {
+                if (!contacts.length) return
+                const digitsOnly = (v: any) => String(v ?? '').replace(/\D/g, '')
+                const numbers = Array.from(new Set(contacts.map(c => digitsOnly(c.whatsapp)).filter(Boolean)))
+                if (!numbers.length) return
+
+                const [waRes, presRes] = await Promise.allSettled([
+                    api.whatsappCheckNumbers({ numbers }),
+                    api.whatsappPresenceCache({ numbers }),
+                ])
+
+                const waByNumber = new Map<string, { is_whatsapp: boolean; jid?: string | null }>()
+                if (waRes.status === 'fulfilled') {
+                    for (const r of waRes.value?.rows || []) {
+                        const d = digitsOnly((r as any).number)
+                        if (!d) continue
+                        waByNumber.set(d, { is_whatsapp: !!(r as any).is_whatsapp, jid: (r as any).jid ?? null })
+                    }
+                }
+
+                const presByNumber = new Map<string, string | null>()
+                if (presRes.status === 'fulfilled') {
+                    for (const r of presRes.value?.rows || []) {
+                        const d = digitsOnly((r as any).number)
+                        if (!d) continue
+                        const p = (r as any).presence
+                        presByNumber.set(d, p ? String(p) : null)
+                    }
+                }
+
+                if (cancelled) return
+                setContactStatuses(prev => prev.map((c: any) => {
+                    const d = digitsOnly(c.whatsapp)
+                    const wa = waByNumber.get(d)
+                    const pres = presByNumber.get(d)
+                    const nextOriginal = { ...(c.original || {}) } as any
+                    if (wa) {
+                        nextOriginal.is_whatsapp = wa.is_whatsapp
+                        nextOriginal.whatsapp_jid = wa.jid ?? null
+                    }
+                    return {
+                        ...c,
+                        is_whatsapp: wa ? wa.is_whatsapp : c.is_whatsapp,
+                        whatsapp_jid: wa ? (wa.jid ?? null) : c.whatsapp_jid,
+                        presence: pres !== undefined ? pres : c.presence,
+                        original: nextOriginal,
+                    }
+                }))
+            } catch {
+            }
+        })()
+        return () => { cancelled = true }
     } else {
-        setEventLogs([])
         setContactStatuses([])
+        return undefined
     }
-  }, [selectedCampanha?.id, selectedCampanha?.conteudo_arquivo])
+  }, [api, selectedCampanha?.id, selectedCampanha?.conteudo_arquivo])
 
   const canSend = useMemo(() => {
       if (!selectedCampanha) return false
@@ -221,6 +321,8 @@ export default function Campanha() {
           onOk: async () => {
               message.loading({ content: 'Resetando campanha...', key: 'reset' })
               try {
+                  await api.resetCampanhaDisparos(selectedCampanha.id)
+
                   // 1. Reset local contacts
                   const resetContacts = contactStatuses.map(c => {
                       const original = { ...c.original, status: 'waiting' } as any
@@ -278,8 +380,14 @@ export default function Campanha() {
                       }
                       return d
                   }))
-                  
-                  setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] CAMPANHA RESETADA.`])
+
+                  try {
+                    if (eventLogsKey) localStorage.removeItem(eventLogsKey)
+                  } catch {}
+                  setEventLogs([
+                    `[${dayjs().format('HH:mm:ss')}] Sistema pronto. Aguardando início do disparo.`,
+                    `[${dayjs().format('HH:mm:ss')}] CAMPANHA RESETADA.`,
+                  ])
                   message.success({ content: 'Campanha resetada com sucesso!', key: 'reset' })
                   
                   // Reload from server to be sure
@@ -371,6 +479,38 @@ export default function Campanha() {
             return (connected.length ? connected : list).filter((x: any) => !!String(x?.id ?? '').trim())
           })()
 
+          try {
+              const digitsOnly = (v: any) => String(v ?? '').replace(/\D/g, '')
+              const toValidate = Array.from(new Set(
+                localContacts
+                  .filter(c => typeof (c as any).is_whatsapp !== 'boolean')
+                  .map(c => digitsOnly((c as any).whatsapp))
+                  .filter(Boolean)
+              ))
+              if (toValidate.length) {
+                  setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] Validando números no WhatsApp (${toValidate.length})...`])
+                  const evoId =
+                    (typeof selectedEvolutionInstanceId === 'string' && selectedEvolutionInstanceId && selectedEvolutionInstanceId !== 'ALL')
+                      ? selectedEvolutionInstanceId
+                      : undefined
+                  const wa = await api.whatsappCheckNumbers({ numbers: toValidate, evolution_api_id: evoId })
+                  const waByNumber = new Map<string, { is_whatsapp: boolean; jid?: string | null }>()
+                  for (const r of wa?.rows || []) {
+                      const d = digitsOnly((r as any).number)
+                      if (!d) continue
+                      waByNumber.set(d, { is_whatsapp: !!(r as any).is_whatsapp, jid: (r as any).jid ?? null })
+                  }
+                  localContacts = localContacts.map((c: any) => {
+                      const d = digitsOnly(c.whatsapp)
+                      const hit = waByNumber.get(d)
+                      if (!hit) return c
+                      return { ...c, is_whatsapp: hit.is_whatsapp, whatsapp_jid: hit.jid ?? null, original: { ...(c.original || {}), is_whatsapp: hit.is_whatsapp, whatsapp_jid: hit.jid ?? null } }
+                  })
+                  setContactStatuses([...localContacts])
+              }
+          } catch {
+          }
+
           // We iterate over the FULL list to maintain indices, but skip success
           for (let i = 0; i < localContacts.length; i++) {
               if (enviosNesteRun >= maxEnviosNesteRun) break
@@ -388,7 +528,10 @@ export default function Campanha() {
               let success = false
               let errorMsg = ''
 
-              try {
+              if (contact.is_whatsapp === false) {
+                  success = false
+                  errorMsg = 'Número não possui WhatsApp'
+              } else try {
                   // Variable Substitution
                   let msg = String(selectedCampanha.descricao ?? '')
                   // Replace (NOME), {NOME}, (NAME), {NAME}
@@ -436,6 +579,10 @@ export default function Campanha() {
               const sentIso = success ? new Date().toISOString() : undefined
               const nextOriginal = { ...(contact.original || {}) } as any
               if (success && sentIso) nextOriginal.enviado_em = sentIso
+              if (typeof contact.is_whatsapp === 'boolean') nextOriginal.is_whatsapp = contact.is_whatsapp
+              if (contact.whatsapp_jid !== undefined) nextOriginal.whatsapp_jid = contact.whatsapp_jid
+              if (contact.resposta !== undefined && contact.resposta !== null) nextOriginal.resposta = contact.resposta
+              if ((contact as any).respondido_em) nextOriginal.respondido_em = (contact as any).respondido_em
               localContacts[i] = { ...contact, status: success ? 'success' : 'error', original: nextOriginal }
               
               // Calculate deltas based on transition
@@ -485,10 +632,15 @@ export default function Campanha() {
           try {
              // Construct new AnexoJSON with updated statuses
              // Map localContacts back to original structure but update status field
-             const newAnexo = localContacts.map(c => ({
-                 ...c.original,
-                 status: c.status
-             }))
+             const newAnexo = localContacts.map(c => {
+                 const base = { ...(c.original || {}) } as any
+                 if (typeof (c as any).is_whatsapp === 'boolean') base.is_whatsapp = (c as any).is_whatsapp
+                 if ((c as any).whatsapp_jid !== undefined) base.whatsapp_jid = (c as any).whatsapp_jid
+                 if ((c as any).resposta !== undefined && (c as any).resposta !== null) base.resposta = (c as any).resposta
+                 if ((c as any).respondido_em) base.respondido_em = (c as any).respondido_em
+                 base.status = c.status
+                 return base
+             })
 
              let finalAnexo: any = newAnexo
              if (selectedCampanha.conteudo_arquivo) {
@@ -913,6 +1065,17 @@ export default function Campanha() {
                                     <div style={{ fontWeight: 500 }}>{item.nome}</div>
                                     <div style={{ fontSize: 11, color: '#999' }}>{item.whatsapp}</div>
                                 </div>
+                                {item.is_whatsapp === true && <Tag color="green" style={{ marginLeft: 6 }}>WHATSAPP VÁLIDO</Tag>}
+                                {item.is_whatsapp === false && <Tag color="red" style={{ marginLeft: 6 }}>WHATSAPP INVÁLIDO</Tag>}
+                                {(() => {
+                                    const p = String(item.presence || '').toLowerCase().trim()
+                                    if (!p) return null
+                                    if (p === 'available' || p === 'online') return <Tag color="green" style={{ marginLeft: 6 }}>ONLINE</Tag>
+                                    if (p === 'unavailable' || p === 'offline') return <Tag style={{ marginLeft: 6 }}>OFFLINE</Tag>
+                                    if (p === 'composing' || p === 'typing') return <Tag color="blue" style={{ marginLeft: 6 }}>DIGITANDO</Tag>
+                                    if (p === 'recording') return <Tag color="purple" style={{ marginLeft: 6 }}>GRAVANDO</Tag>
+                                    return <Tag style={{ marginLeft: 6 }}>{p.toUpperCase()}</Tag>
+                                })()}
                                 {item.resposta === 1 && <Tag color="green" style={{ marginLeft: 6 }}>SIM</Tag>}
                                 {item.resposta === 2 && <Tag color="red" style={{ marginLeft: 6 }}>NÃO</Tag>}
                             </Space>

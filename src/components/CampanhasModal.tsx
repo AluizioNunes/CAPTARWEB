@@ -336,7 +336,7 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
         messageApi.error('Informe a pergunta (SIM/NÃO)')
         return
       }
-      if (values.recorrencia_ativa) {
+      {
         const min = Number(values.intervalo_min_seg)
         const max = Number(values.intervalo_max_seg)
         if (!Number.isFinite(min) || !Number.isFinite(max) || min <= 0 || max <= 0) {
@@ -700,10 +700,10 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
           </Space>
 
           <Space style={{ display: 'flex', marginBottom: 8 }} align="start" wrap>
-            <Form.Item name="intervalo_min_seg" label="INTERVALO MÍNIMO (SEG)" rules={recorrenciaAtiva ? [{ required: true }] : undefined}>
+            <Form.Item name="intervalo_min_seg" label="INTERVALO MÍNIMO (SEG)" rules={[{ required: true }]}>
               <InputNumber min={1} max={3600} style={{ width: 200 }} />
             </Form.Item>
-            <Form.Item name="intervalo_max_seg" label="INTERVALO MÁXIMO (SEG)" rules={recorrenciaAtiva ? [{ required: true }] : undefined}>
+            <Form.Item name="intervalo_max_seg" label="INTERVALO MÁXIMO (SEG)" rules={[{ required: true }]}>
               <InputNumber min={1} max={3600} style={{ width: 200 }} />
             </Form.Item>
             <Form.Item name="bloco_atual" label="BLOCO ATUAL">

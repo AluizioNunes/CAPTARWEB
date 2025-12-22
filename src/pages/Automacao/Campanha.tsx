@@ -655,15 +655,14 @@ export default function Campanha() {
                   setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] [ERRO] Falha ao entregar para ${contact.whatsapp}: ${errorMsg}`])
               }
               
-              const waitSeconds = recorrenciaAtiva
-                ? Math.floor(Math.random() * (intervaloMaxSeg - intervaloMinSeg + 1)) + intervaloMinSeg
-                : 1
+              const waitSeconds =
+                Number.isFinite(intervaloMinSeg) && Number.isFinite(intervaloMaxSeg) && intervaloMinSeg > 0 && intervaloMaxSeg > 0
+                  ? Math.floor(Math.random() * (intervaloMaxSeg - intervaloMinSeg + 1)) + intervaloMinSeg
+                  : 1
               const baseMs = lastDispatchAtMs ?? Date.now()
               const targetMs = baseMs + (waitSeconds * 1000)
               const sleepMs = Math.max(0, targetMs - Date.now())
-              if (recorrenciaAtiva) {
-                setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] INTERVALO: aguardando ${Math.ceil(sleepMs / 1000)}s (range ${intervaloMinSeg}-${intervaloMaxSeg}).`])
-              }
+              setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] INTERVALO: aguardando ${Math.ceil(sleepMs / 1000)}s (range ${intervaloMinSeg}-${intervaloMaxSeg}).`])
               await new Promise(resolve => globalThis.setTimeout(resolve, sleepMs))
           }
           

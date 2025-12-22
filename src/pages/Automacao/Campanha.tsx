@@ -210,6 +210,37 @@ export default function Campanha() {
                             original: row
                         }
                     }).filter(c => c.whatsapp) // Filter out those without phone
+
+                    const digitsOnly = (v: any) => String(v ?? '').replace(/\D/g, '')
+                    const freq = new Map<string, number>()
+                    for (const c of contacts) {
+                      const d = digitsOnly((c as any).whatsapp)
+                      if (!d) continue
+                      freq.set(d, (freq.get(d) || 0) + 1)
+                    }
+                    const seen = new Set<string>()
+                    let excluidos = 0
+                    let duplicadosDistintos = 0
+                    for (const c of freq.values()) {
+                      if (c > 1) {
+                        duplicadosDistintos++
+                        excluidos += (c - 1)
+                      }
+                    }
+                    contacts = contacts
+                      .map((c: any) => ({ ...c, whatsapp: digitsOnly(c.whatsapp) }))
+                      .filter((c: any) => !!String(c.whatsapp || '').trim())
+                      .filter((c: any) => {
+                        const d = String(c.whatsapp)
+                        if (!d) return false
+                        if (seen.has(d)) return false
+                        seen.add(d)
+                        return true
+                      })
+
+                    if (duplicadosDistintos > 0 || excluidos > 0) {
+                      setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] LISTA: ${duplicadosDistintos} número(s) repetido(s), ${excluidos} registro(s) não entrarão. Válidos: ${contacts.length}.`])
+                    }
                     
                     if (contacts.length === 0) {
                          setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] ERRO: Nenhum contato com 'whatsapp' encontrado.`])
@@ -471,6 +502,7 @@ export default function Campanha() {
 
           let enviosNesteRun = 0
           let dispatchIndex = 0
+          let lastDispatchAtMs: number | null = null
 
           const rrPool = (() => {
             if (selectedEvolutionInstanceId !== 'ALL') return []
@@ -574,9 +606,12 @@ export default function Campanha() {
                   success = false
                   errorMsg = err.response?.data?.detail || err.message || 'Erro desconhecido'
               }
+
+              const dispatchAtMs = Date.now()
+              lastDispatchAtMs = dispatchAtMs
               
               // Update status in local array
-              const sentIso = success ? new Date().toISOString() : undefined
+              const sentIso = success ? new Date(dispatchAtMs).toISOString() : undefined
               const nextOriginal = { ...(contact.original || {}) } as any
               if (success && sentIso) nextOriginal.enviado_em = sentIso
               if (typeof contact.is_whatsapp === 'boolean') nextOriginal.is_whatsapp = contact.is_whatsapp
@@ -623,7 +658,13 @@ export default function Campanha() {
               const waitSeconds = recorrenciaAtiva
                 ? Math.floor(Math.random() * (intervaloMaxSeg - intervaloMinSeg + 1)) + intervaloMinSeg
                 : 1
-              await new Promise(resolve => globalThis.setTimeout(resolve, waitSeconds * 1000))
+              const baseMs = lastDispatchAtMs ?? Date.now()
+              const targetMs = baseMs + (waitSeconds * 1000)
+              const sleepMs = Math.max(0, targetMs - Date.now())
+              if (recorrenciaAtiva) {
+                setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] INTERVALO: aguardando ${Math.ceil(sleepMs / 1000)}s (range ${intervaloMinSeg}-${intervaloMaxSeg}).`])
+              }
+              await new Promise(resolve => globalThis.setTimeout(resolve, sleepMs))
           }
           
           setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] DISPARO FINALIZADO.`])

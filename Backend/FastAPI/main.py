@@ -1024,16 +1024,26 @@ class WhatsAppNumbersCheckRequest(BaseModel):
 @app.post("/api/integrations/whatsapp/whatsapp-numbers")
 async def whatsapp_check_numbers(payload: WhatsAppNumbersCheckRequest, request: Request):
     try:
-        with get_conn_for_request(request) as conn:
-            evo = _get_evolution_instance(conn, payload.evolution_api_id)
-            base_url = _get_evolution_base_url(conn)
+        try:
+            with get_conn_for_request(request) as conn:
+                evo = _get_evolution_instance(conn, payload.evolution_api_id)
+                base_url = _get_evolution_base_url(conn)
+        except HTTPException as he:
+            detail = str(getattr(he, "detail", "") or "")
+            if he.status_code == 500 and (
+                "Token da instância Evolution API não encontrado" in detail
+                or "Configuração da Evolution API incompleta no servidor" in detail
+            ):
+                return {"rows": [], "instance": "none"}
+            raise
+
         instance = evo["name"]
         api_key = str(evo.get("token") or "").strip() or str(os.getenv("AUTHENTICATION_API_KEY", "") or "").strip()
         if not api_key:
-            raise HTTPException(status_code=500, detail="Token da instância Evolution API não encontrado.")
+            return {"rows": [], "instance": instance}
         base_candidates = _evolution_base_url_candidates(base_url)
         if not base_candidates:
-            raise HTTPException(status_code=500, detail="Configuração da Evolution API incompleta no servidor.")
+            return {"rows": [], "instance": instance}
 
         nums: List[str] = []
         seen: set[str] = set()
@@ -3399,6 +3409,26 @@ async def campanhas_upload_anexo(id: int, request: Request, file: UploadFile = F
                 if df is not None:
                     # Limpeza básica
                     df = df.fillna('')
+                    meta_to_set = None
+                    try:
+                        cols = [str(c) for c in df.columns]
+                        wa_col = None
+                        for c in cols:
+                            cl = c.strip().lower()
+                            if cl == 'whatsapp' or 'whatsapp' in cl:
+                                wa_col = c
+                                break
+                        if wa_col:
+                            digits = df[wa_col].astype(str).str.replace(r'\D', '', regex=True)
+                            df[wa_col] = digits
+                            df = df[df[wa_col].astype(str).str.len() > 0]
+                            vc = df[wa_col].value_counts()
+                            meta_to_set = int(vc.shape[0])
+                            df = df.drop_duplicates(subset=[wa_col], keep='first')
+                        else:
+                            meta_to_set = int(len(df))
+                    except Exception:
+                        meta_to_set = int(len(df))
                     # Converter para JSON string (lista de objetos)
                     content_str = df.to_json(orient='records', force_ascii=False, date_format='iso')
                     print(f"Arquivo processado com sucesso. Registros: {len(df)}")
@@ -3468,6 +3498,13 @@ async def campanhas_upload_anexo(id: int, request: Request, file: UploadFile = F
                     f"UPDATE \"{DB_SCHEMA}\".\"Campanhas\" SET \"AnexoJSON\" = %s::jsonb WHERE \"IdCampanha\" = %s AND \"IdTenant\" = %s",
                     (json.dumps(new_anexo, ensure_ascii=False), id, tid)
                 )
+                try:
+                    cursor.execute(
+                        f"UPDATE \"{DB_SCHEMA}\".\"Campanhas\" SET \"Meta\" = %s WHERE \"IdCampanha\" = %s AND \"IdTenant\" = %s",
+                        (int(meta_to_set) if meta_to_set is not None else int(len(records_obj)), id, tid)
+                    )
+                except Exception:
+                    pass
             
             # Se tiver imagem, salvar path
             if image_path:

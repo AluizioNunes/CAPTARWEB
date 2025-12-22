@@ -38,6 +38,13 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
   const [positivos, setPositivos] = useState(0)
   const [negativos, setNegativos] = useState(0)
   const [aguardando, setAguardando] = useState(0)
+  const [arquivoResumo, setArquivoResumo] = useState({
+    registros: 0,
+    duplicados_distintos: 0,
+    excluidos: 0,
+    validos: 0,
+  })
+  const blocosPorDiaWatch = Form.useWatch('blocos_por_dia', form)
 
   const loginDateObj = useMemo(() => {
     const lt = (user as any)?.login_time
@@ -184,6 +191,7 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
         setPositivos(0)
         setNegativos(0)
         setAguardando(0)
+        setArquivoResumo({ registros: 0, duplicados_distintos: 0, excluidos: 0, validos: 0 })
       }
     }
   }, [open, initial])
@@ -191,11 +199,52 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
   // Calculate Meta dynamically based on selection
   useEffect(() => {
     const calculateMeta = async () => {
+        const digitsOnly = (v: any) => String(v ?? '').replace(/\D/g, '')
+        const calcResumoFromRows = (rows: any[]) => {
+          const freq = new Map<string, number>()
+          for (const row of rows) {
+            if (!row || typeof row !== 'object') continue
+            const keys = Object.keys(row)
+            const whatsappKey =
+              keys.find(k => String(k).trim().toLowerCase() === 'whatsapp')
+              || keys.find(k => String(k).trim().toLowerCase().includes('whatsapp'))
+              || keys.find(k => ['celular', 'telefone', 'phone', 'mobile', 'tel'].includes(String(k).trim().toLowerCase()))
+            const raw = whatsappKey ? (row as any)[whatsappKey] : ''
+            const d = digitsOnly(raw)
+            if (!d) continue
+            freq.set(d, (freq.get(d) || 0) + 1)
+          }
+          let duplicadosDistintos = 0
+          let excluidos = 0
+          for (const c of freq.values()) {
+            if (c > 1) {
+              duplicadosDistintos++
+              excluidos += (c - 1)
+            }
+          }
+          const validos = freq.size
+          return { duplicados_distintos: duplicadosDistintos, excluidos, validos }
+        }
+        const detectDelimiter = (headerLine: string) => {
+          const candidates = [',', ';', '\t', '|']
+          let best = ','
+          let bestCount = -1
+          for (const c of candidates) {
+            const cnt = headerLine.split(c).length - 1
+            if (cnt > bestCount) {
+              bestCount = cnt
+              best = c
+            }
+          }
+          return best
+        }
+
         if (destino === 'eleitores') {
             try {
                 // Fetch total eleitores from dashboard stats or dedicated endpoint
                 const stats = await api.getDashboardStats()
                 setMeta(stats.totalEleitores || 0)
+                setArquivoResumo({ registros: 0, duplicados_distintos: 0, excluidos: 0, validos: 0 })
             } catch (e) {
                 console.error('Erro ao buscar total de eleitores', e)
             }
@@ -207,8 +256,14 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
                         const text = await file.text()
                         const json = JSON.parse(text)
                         if (Array.isArray(json)) {
-                            setMeta(json.length)
-                            // Validação da chave whatsapp
+                            const resumo = calcResumoFromRows(json)
+                            setArquivoResumo({
+                              registros: json.length,
+                              duplicados_distintos: resumo.duplicados_distintos,
+                              excluidos: resumo.excluidos,
+                              validos: resumo.validos,
+                            })
+                            setMeta(resumo.validos)
                             if (json.length > 0) {
                                 const keys = Object.keys(json[0]).map(k => k.toLowerCase())
                                 if (!keys.includes('whatsapp')) {
@@ -220,28 +275,59 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
                 } else if (file.name.endsWith('.csv')) {
                     try {
                         const text = await file.text()
-                        const lines = text.split('\n').filter((l: string) => l.trim().length > 0)
+                        const lines = text.split(/\r?\n/).filter((l: string) => l.trim().length > 0)
                         if (lines.length > 0) {
-                            // Validação da coluna whatsapp
-                            const header = lines[0].toLowerCase()
-                            if (!header.includes('whatsapp')) {
+                            const headerLine = lines[0]
+                            const delim = detectDelimiter(headerLine)
+                            const headers = headerLine.split(delim).map((h: string) => String(h ?? '').trim().replace(/^"|"$/g, '').toLowerCase())
+                            const idxWhatsapp = headers.findIndex((h: string) => h === 'whatsapp' || h.includes('whatsapp'))
+                            if (idxWhatsapp < 0) {
                                 messageApi.warning('Atenção: O arquivo CSV não contém a coluna "whatsapp".')
                             }
-                            setMeta(Math.max(0, lines.length - 1)) // Assume header
+                            const rows: any[] = []
+                            for (let i = 1; i < lines.length; i++) {
+                              const parts = lines[i].split(delim)
+                              const val = idxWhatsapp >= 0 ? parts[idxWhatsapp] : ''
+                              rows.push({ whatsapp: String(val ?? '').trim().replace(/^"|"$/g, '') })
+                            }
+                            const resumo = calcResumoFromRows(rows)
+                            const registros = Math.max(0, lines.length - 1)
+                            setArquivoResumo({
+                              registros,
+                              duplicados_distintos: resumo.duplicados_distintos,
+                              excluidos: resumo.excluidos,
+                              validos: resumo.validos,
+                            })
+                            setMeta(resumo.validos)
                         } else {
                             setMeta(0)
+                            setArquivoResumo({ registros: 0, duplicados_distintos: 0, excluidos: 0, validos: 0 })
                         }
                     } catch {}
                 } else {
-                    // XLS/PDF - difficult to count client-side without heavy libs
-                    // Keep current meta or set to 0? User asked to show it.
-                    // We'll leave it as is or 0 if new file
+                    setMeta(0)
+                    setArquivoResumo({ registros: 0, duplicados_distintos: 0, excluidos: 0, validos: 0 })
                 }
             }
         }
     }
     calculateMeta()
   }, [destino, fileList, api])
+
+  useEffect(() => {
+    if (!open) return
+    const perDayRaw = Number(blocosPorDiaWatch ?? form.getFieldValue('blocos_por_dia') ?? 1)
+    const perDay = Math.max(1, Math.min(24, Math.floor(perDayRaw || 1)))
+    const validRaw = Math.floor(Number(meta ?? 0))
+    const valid = Math.max(0, Number.isFinite(validRaw) ? validRaw : 0)
+    const total = Math.max(1, Math.min(perDay, valid || 1))
+    const mpb = Math.max(1, Math.ceil((valid || 1) / total))
+    const curTotal = Number(form.getFieldValue('total_blocos') ?? 0)
+    const curMpb = Number(form.getFieldValue('mensagens_por_bloco') ?? 0)
+    if (curTotal !== total || curMpb !== mpb) {
+      form.setFieldsValue({ total_blocos: total, mensagens_por_bloco: mpb })
+    }
+  }, [open, meta, blocosPorDiaWatch, form])
 
   const handleOk = async () => {
     try {
@@ -318,9 +404,30 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
                 const text = await file.text()
                 try {
                    const jsonContent = JSON.parse(text)
+                   const digitsOnly = (v: any) => String(v ?? '').replace(/\D/g, '')
+                   const dedupByWhatsapp = (rows: any[]) => {
+                      const out: any[] = []
+                      const seen = new Set<string>()
+                      for (const row of rows) {
+                        if (!row || typeof row !== 'object') continue
+                        const keys = Object.keys(row)
+                        const whatsappKey =
+                          keys.find(k => String(k).trim().toLowerCase() === 'whatsapp')
+                          || keys.find(k => String(k).trim().toLowerCase().includes('whatsapp'))
+                          || keys.find(k => ['celular', 'telefone', 'phone', 'mobile', 'tel'].includes(String(k).trim().toLowerCase()))
+                        const raw = whatsappKey ? (row as any)[whatsappKey] : ''
+                        const d = digitsOnly(raw)
+                        if (!d) continue
+                        if (seen.has(d)) continue
+                        seen.add(d)
+                        if (whatsappKey) (row as any)[whatsappKey] = d
+                        out.push(row)
+                      }
+                      return out
+                   }
                    // We wrap it
                    finalAnexoJSON = {
-                       contacts: Array.isArray(jsonContent) ? jsonContent : [],
+                       contacts: Array.isArray(jsonContent) ? dedupByWhatsapp(jsonContent) : [],
                        config: configToSave
                    }
                    // We need to pass this as string to AnexoJSON field?
@@ -523,7 +630,50 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
           </Form.Item>
         </Card>
 
+        <Card title="DESTINATÁRIOS" size="small" style={{ marginTop: 16 }}>
+            <Form.Item label="SELECIONE A ORIGEM DOS CONTATOS">
+                <Radio.Group value={destino} onChange={e => setDestino(e.target.value)}>
+                    <Radio.Button value="eleitores"><TeamOutlined /> BASE DE ELEITORES</Radio.Button>
+                    <Radio.Button value="arquivo"><FileTextOutlined /> IMPORTAR ARQUIVO</Radio.Button>
+                </Radio.Group>
+            </Form.Item>
+
+            {destino === 'arquivo' && (
+                <Form.Item label="ARQUIVO DE CONTATOS (JSON, CSV, XLS, PDF)" required>
+                    <Upload
+                        maxCount={1}
+                        fileList={fileList}
+                        onChange={({ fileList }) => setFileList(fileList)}
+                        beforeUpload={() => false}
+                        accept=".json,.csv,.xls,.xlsx,.pdf"
+                    >
+                        <Button icon={<UploadOutlined />}>Selecionar Arquivo</Button>
+                    </Upload>
+                    <div style={{ marginTop: 8, color: '#666', fontSize: '12px' }}>
+                        JSON: O conteúdo será salvo no banco.<br/>
+                        Outros: O arquivo será anexado.
+                    </div>
+                </Form.Item>
+            )}
+        </Card>
+
         <Card title="RECORRÊNCIA / BLOCOS" size="small" style={{ marginTop: 16 }}>
+          {destino === 'arquivo' && fileList.length > 0 ? (
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+              <div style={{ background: '#fafafa', border: '1px solid #eee', padding: '6px 10px' }}>
+                REGISTROS NO ARQUIVO: <strong>{arquivoResumo.registros}</strong>
+              </div>
+              <div style={{ background: '#fafafa', border: '1px solid #eee', padding: '6px 10px' }}>
+                NÚMEROS REPETIDOS: <strong>{arquivoResumo.duplicados_distintos}</strong>
+              </div>
+              <div style={{ background: '#fafafa', border: '1px solid #eee', padding: '6px 10px' }}>
+                NÃO VÃO ENTRAR: <strong>{arquivoResumo.excluidos}</strong>
+              </div>
+              <div style={{ background: '#f6ffed', border: '1px solid #b7eb8f', padding: '6px 10px' }}>
+                CONTATOS VÁLIDOS PARA ENVIO: <strong>{arquivoResumo.validos}</strong>
+              </div>
+            </div>
+          ) : null}
           <Form.Item name="recorrencia_ativa" label="ATIVAR RECORRÊNCIA" initialValue={false}>
             <Radio.Group
               value={recorrenciaAtiva}
@@ -560,33 +710,6 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
               <InputNumber min={0} max={999} style={{ width: 160 }} />
             </Form.Item>
           </Space>
-        </Card>
-
-        <Card title="DESTINATÁRIOS" size="small" style={{ marginTop: 16 }}>
-            <Form.Item label="SELECIONE A ORIGEM DOS CONTATOS">
-                <Radio.Group value={destino} onChange={e => setDestino(e.target.value)}>
-                    <Radio.Button value="eleitores"><TeamOutlined /> BASE DE ELEITORES</Radio.Button>
-                    <Radio.Button value="arquivo"><FileTextOutlined /> IMPORTAR ARQUIVO</Radio.Button>
-                </Radio.Group>
-            </Form.Item>
-
-            {destino === 'arquivo' && (
-                <Form.Item label="ARQUIVO DE CONTATOS (JSON, CSV, XLS, PDF)" required>
-                    <Upload
-                        maxCount={1}
-                        fileList={fileList}
-                        onChange={({ fileList }) => setFileList(fileList)}
-                        beforeUpload={() => false}
-                        accept=".json,.csv,.xls,.xlsx,.pdf"
-                    >
-                        <Button icon={<UploadOutlined />}>Selecionar Arquivo</Button>
-                    </Upload>
-                    <div style={{ marginTop: 8, color: '#666', fontSize: '12px' }}>
-                        JSON: O conteúdo será salvo no banco.<br/>
-                        Outros: O arquivo será anexado.
-                    </div>
-                </Form.Item>
-            )}
         </Card>
 
         <Space style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end', width: '100%' }}>

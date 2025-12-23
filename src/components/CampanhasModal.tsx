@@ -5,8 +5,10 @@ import { useApi } from '../context/ApiContext'
 import { useAuthStore } from '../store/authStore'
 import { format, parseISO, isValid } from 'date-fns'
 import { ptBR } from 'date-fns/locale'
-import dayjs from 'dayjs'
+import * as dayjsNs from 'dayjs'
 import Logo from '../images/CAPTAR LOGO OFICIAL.jpg'
+
+const dayjs = (dayjsNs as any).default ?? (dayjsNs as any)
 
 interface Props {
   open: boolean
@@ -555,7 +557,7 @@ export default function CampanhasModal({ open, initial, onCancel, onSaved }: Pro
             <Form.Item label="PERGUNTA (SIM/NÃO)">
               <Input
                 value={perguntaSimNao}
-                onChange={(e) => setPerguntaSimNao(String(e.target.value || '').toUpperCase())}
+                onChange={(e: any) => setPerguntaSimNao(String(e?.target?.value || '').toUpperCase())}
                 placeholder="Ex: VOCÊ APOIA NOSSO PROJETO?"
               />
             </Form.Item>

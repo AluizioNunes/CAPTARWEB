@@ -1,0 +1,328 @@
+# api_examples.py
+"""
+Exemplos de como usar a API e integrar com Evolution API
+"""
+
+import httpx
+import asyncio
+from datetime import datetime
+
+# ===================== CONFIGURAÇÕES =====================
+API_BASE_URL = "http://localhost:8000"
+EVOLUTION_API_URL = "https://sua-evolution-api.com"
+EVOLUTION_API_KEY = "sua_api_key"
+INSTANCE_NAME = "sua_instancia"
+
+# ===================== EXEMPLO 1: ENVIAR MENSAGEM =====================
+async def example_send_message():
+    """Envia uma mensagem simples"""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{API_BASE_URL}/api/messages/send",
+            json={
+                "number": "5511999999999",
+                "text": "Olá! Esta é uma mensagem de teste."
+            }
+        )
+        
+        print("📤 Enviar Mensagem:")
+        print(f"Status: {response.status_code}")
+        print(f"Resposta: {response.json()}")
+        print()
+
+# ===================== EXEMPLO 2: LISTAR MENSAGENS =====================
+async def example_list_messages():
+    """Lista todas as mensagens"""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{API_BASE_URL}/api/messages")
+        
+        print("📋 Listar Mensagens:")
+        messages = response.json()
+        print(f"Total de mensagens: {len(messages)}")
+        
+        for msg in messages[:3]:  # Mostrar apenas 3 primeiras
+            print(f"\n  ID: {msg['id']}")
+            print(f"  Número: {msg['number']}")
+            print(f"  Status: {msg['status']}")
+            print(f"  Enviada: {msg['sentAt']}")
+        print()
+
+# ===================== EXEMPLO 3: FILTRAR POR STATUS =====================
+async def example_filter_by_status():
+    """Filtra mensagens por status"""
+    async with httpx.AsyncClient() as client:
+        # Buscar apenas mensagens lidas
+        response = await client.get(
+            f"{API_BASE_URL}/api/messages",
+            params={"status": "READ"}
+        )
+        
+        print("🔍 Filtrar por Status (READ):")
+        messages = response.json()
+        print(f"Mensagens lidas: {len(messages)}")
+        print()
+
+# ===================== EXEMPLO 4: BUSCAR MENSAGENS =====================
+async def example_search_messages():
+    """Busca mensagens por termo"""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{API_BASE_URL}/api/messages",
+            params={"search": "5511"}
+        )
+        
+        print("🔎 Buscar Mensagens:")
+        messages = response.json()
+        print(f"Mensagens encontradas: {len(messages)}")
+        print()
+
+# ===================== EXEMPLO 5: OBTER ESTATÍSTICAS =====================
+async def example_get_stats():
+    """Obtém estatísticas das mensagens"""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{API_BASE_URL}/api/stats")
+        
+        print("📊 Estatísticas:")
+        stats = response.json()
+        print(f"  Total: {stats['total']}")
+        print(f"  Enviadas: {stats['sent']}")
+        print(f"  Entregues: {stats['delivered']}")
+        print(f"  Lidas: {stats['read']}")
+        print(f"  Falhadas: {stats['failed']}")
+        print()
+
+# ===================== EXEMPLO 6: CONFIGURAR WEBHOOK NA EVOLUTION API =====================
+async def example_configure_webhook():
+    """Configura webhook na Evolution API"""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{EVOLUTION_API_URL}/webhook/set/{INSTANCE_NAME}",
+            headers={
+                "Content-Type": "application/json",
+                "apikey": EVOLUTION_API_KEY
+            },
+            json={
+                "url": f"{API_BASE_URL}/api/webhook",
+                "webhook_by_events": False,
+                "webhook_base64": False,
+                "events": [
+                    "QRCODE_UPDATED",
+                    "MESSAGES_UPSERT",
+                    "MESSAGES_UPDATE",
+                    "MESSAGES_DELETE",
+                    "SEND_MESSAGE",
+                    "CONNECTION_UPDATE"
+                ]
+            }
+        )
+        
+        print("🔗 Configurar Webhook:")
+        print(f"Status: {response.status_code}")
+        print(f"Resposta: {response.json()}")
+        print()
+
+# ===================== EXEMPLO 7: VALIDAR NÚMERO WHATSAPP =====================
+async def example_check_whatsapp_number():
+    """Verifica se um número é WhatsApp válido"""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{EVOLUTION_API_URL}/chat/whatsappNumbers/{INSTANCE_NAME}",
+            headers={
+                "Content-Type": "application/json",
+                "apikey": EVOLUTION_API_KEY
+            },
+            json={
+                "numbers": ["5511999999999", "5511888888888"]
+            }
+        )
+        
+        print("✅ Validar Números WhatsApp:")
+        print(f"Status: {response.status_code}")
+        result = response.json()
+        
+        for number_info in result:
+            print(f"\n  Número: {number_info.get('jid', 'N/A')}")
+            print(f"  Existe: {number_info.get('exists', False)}")
+        print()
+
+# ===================== EXEMPLO 8: ENVIAR MENSAGEM COM MÍDIA =====================
+async def example_send_media():
+    """Envia mensagem com imagem"""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{EVOLUTION_API_URL}/message/sendMedia/{INSTANCE_NAME}",
+            headers={
+                "Content-Type": "application/json",
+                "apikey": EVOLUTION_API_KEY
+            },
+            json={
+                "number": "5511999999999",
+                "mediatype": "image",
+                "media": "https://exemplo.com/imagem.jpg",
+                "caption": "Confira esta imagem!"
+            }
+        )
+        
+        print("🖼️ Enviar Mídia:")
+        print(f"Status: {response.status_code}")
+        print(f"Resposta: {response.json()}")
+        print()
+
+# ===================== EXEMPLO 9: MARCAR MENSAGEM COMO LIDA =====================
+async def example_mark_as_read():
+    """Marca mensagem como lida"""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{EVOLUTION_API_URL}/chat/markMessageAsRead/{INSTANCE_NAME}",
+            headers={
+                "Content-Type": "application/json",
+                "apikey": EVOLUTION_API_KEY
+            },
+            json={
+                "remoteJid": "5511999999999@s.whatsapp.net",
+                "fromMe": False,
+                "id": "MESSAGE_ID_AQUI"
+            }
+        )
+        
+        print("👁️ Marcar como Lida:")
+        print(f"Status: {response.status_code}")
+        print()
+
+# ===================== EXEMPLO 10: BUSCAR MENSAGENS NO EVOLUTION API =====================
+async def example_find_messages_evolution():
+    """Busca mensagens diretamente na Evolution API"""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{EVOLUTION_API_URL}/chat/findMessages/{INSTANCE_NAME}",
+            headers={
+                "Content-Type": "application/json",
+                "apikey": EVOLUTION_API_KEY
+            },
+            json={
+                "where": {
+                    "remoteJid": "5511999999999@s.whatsapp.net"
+                },
+                "limit": 10
+            }
+        )
+        
+        print("💬 Buscar Mensagens (Evolution API):")
+        print(f"Status: {response.status_code}")
+        messages = response.json()
+        print(f"Mensagens encontradas: {len(messages)}")
+        print()
+
+# ===================== EXEMPLO 11: ENVIO EM MASSA =====================
+async def example_bulk_send():
+    """Envia mensagens em massa"""
+    contacts = [
+        {"number": "5511999999999", "name": "João"},
+        {"number": "5511888888888", "name": "Maria"},
+        {"number": "5511777777777", "name": "Pedro"}
+    ]
+    
+    async with httpx.AsyncClient() as client:
+        print("📨 Envio em Massa:")
+        
+        for contact in contacts:
+            message_text = f"Olá {contact['name']}! Esta é uma mensagem personalizada."
+            
+            response = await client.post(
+                f"{API_BASE_URL}/api/messages/send",
+                json={
+                    "number": contact['number'],
+                    "text": message_text
+                }
+            )
+            
+            print(f"  ✓ {contact['name']}: {response.status_code}")
+            
+            # Aguardar 2 segundos entre envios (evitar bloqueio)
+            await asyncio.sleep(2)
+        
+        print()
+
+# ===================== EXEMPLO 12: MONITORAR STATUS EM TEMPO REAL =====================
+async def example_monitor_status():
+    """Monitora status de uma mensagem específica"""
+    message_id = "msg_123456"
+    
+    print(f"👀 Monitorando mensagem {message_id}...")
+    
+    async with httpx.AsyncClient() as client:
+        for i in range(5):  # Verificar 5 vezes
+            response = await client.get(f"{API_BASE_URL}/api/messages")
+            messages = response.json()
+            
+            # Buscar mensagem específica
+            message = next((m for m in messages if m['id'] == message_id), None)
+            
+            if message:
+                print(f"  [{i+1}] Status: {message['status']} | Entregue: {message.get('deliveredAt', 'N/A')}")
+            else:
+                print(f"  [{i+1}] Mensagem não encontrada")
+            
+            await asyncio.sleep(3)  # Aguardar 3 segundos
+    
+    print()
+
+# ===================== EXEMPLO 13: RELATÓRIO DIÁRIO =====================
+async def example_daily_report():
+    """Gera relatório diário de mensagens"""
+    async with httpx.AsyncClient() as client:
+        # Obter estatísticas
+        stats_response = await client.get(f"{API_BASE_URL}/api/stats")
+        stats = stats_response.json()
+        
+        # Obter mensagens
+        messages_response = await client.get(f"{API_BASE_URL}/api/messages")
+        messages = messages_response.json()
+        
+        print("📈 RELATÓRIO DIÁRIO")
+        print("=" * 50)
+        print(f"Data: {datetime.now().strftime('%d/%m/%Y')}")
+        print()
+        print(f"📊 Resumo:")
+        print(f"  Total de mensagens: {stats['total']}")
+        print(f"  Taxa de sucesso: {(stats['sent']/stats['total']*100):.1f}%")
+        print(f"  Taxa de entrega: {(stats['delivered']/stats['total']*100):.1f}%")
+        print(f"  Taxa de leitura: {(stats['read']/stats['total']*100):.1f}%")
+        print()
+        
+        # Mensagens falhadas
+        failed = [m for m in messages if m['status'] == 'ERROR']
+        if failed:
+            print(f"❌ Mensagens Falhadas ({len(failed)}):")
+            for msg in failed[:5]:
+                print(f"  • {msg['number']}: {msg.get('errorMessage', 'Erro desconhecido')}")
+        
+        print("=" * 50)
+        print()
+
+# ===================== EXECUTAR TODOS OS EXEMPLOS =====================
+async def run_all_examples():
+    """Executa todos os exemplos"""
+    print("\n" + "="*60)
+    print("EXEMPLOS DE USO - EVOLUTION API DASHBOARD")
+    print("="*60 + "\n")
+    
+    # await example_send_message()
+    # await example_list_messages()
+    # await example_filter_by_status()
+    # await example_search_messages()
+    await example_get_stats()
+    # await example_configure_webhook()
+    # await example_check_whatsapp_number()
+    # await example_send_media()
+    # await example_bulk_send()
+    await example_daily_report()
+    
+    print("✅ Todos os exemplos foram executados!\n")
+
+if __name__ == "__main__":
+    # Executar exemplos
+    asyncio.run(run_all_examples())
+    
+    # Ou executar exemplo específico:
+    # asyncio.run(example_send_message())

@@ -5,7 +5,9 @@ import { TeamOutlined, CheckCircleOutlined, ExclamationCircleOutlined, SyncOutli
 import { useAuthStore } from '../../store/authStore'
 import { useApi } from '../../context/ApiContext'
 import CampanhasModal from '../../components/CampanhasModal'
-import dayjs from 'dayjs'
+import * as dayjsNs from 'dayjs'
+
+const dayjs = (dayjsNs as any).default ?? (dayjsNs as any)
 
 export default function Campanha() {
   const [data, setData] = useState<any[]>([])
@@ -785,6 +787,8 @@ export default function Campanha() {
           'status',
           'meta',
           'enviados',
+          'entregues',
+          'visualizados',
           'aguardando',
           'data_inicio',
           'data_fim',
@@ -802,11 +806,33 @@ export default function Campanha() {
         
         const visKey = `campanhas.columns.visible.${(user as any)?.usuario || 'default'}`
         const savedVis = localStorage.getItem(visKey)
-        setVisibleCols(savedVis ? JSON.parse(savedVis) : visDefault)
+        const parsedVis = (() => {
+          try {
+            return savedVis ? JSON.parse(savedVis) : null
+          } catch {
+            return null
+          }
+        })()
+        setVisibleCols(parsedVis ? { ...visDefault, ...parsedVis } : visDefault)
         
         const orderKey = `campanhas.columns.order.${(user as any)?.usuario || 'default'}`
         const savedOrder = localStorage.getItem(orderKey)
-        setOrderedKeys(savedOrder ? JSON.parse(savedOrder) : defaultOrder.filter(n => byName[n]))
+        const parsedOrder = (() => {
+          try {
+            return savedOrder ? JSON.parse(savedOrder) : null
+          } catch {
+            return null
+          }
+        })()
+        const baseOrder = defaultOrder.filter(n => byName[n])
+        if (Array.isArray(parsedOrder)) {
+          const filtered = parsedOrder.filter((k: any) => typeof k === 'string' && byName[String(k)])
+          const setKeys = new Set(filtered)
+          for (const k of baseOrder) if (!setKeys.has(k)) filtered.push(k)
+          setOrderedKeys(filtered)
+        } else {
+          setOrderedKeys(baseOrder)
+        }
       }
 
       const res = await api.getCampanhas()
@@ -856,6 +882,8 @@ export default function Campanha() {
       data_fim: 'FIM',
       meta: 'META',
       enviados: 'ENVIADOS',
+      entregues: 'ENTREGUES',
+      visualizados: 'VISUALIZADOS',
       nao_enviados: 'NÃO ENVIADOS',
       positivos: 'RESPOSTAS POSITIVAS',
       negativos: 'RESPOSTAS NEGATIVAS',
@@ -863,7 +891,7 @@ export default function Campanha() {
       created_at: 'CRIADO EM',
     }
 
-    const centerCols = new Set(['id', 'status', 'data_inicio', 'data_fim', 'created_at'])
+    const centerCols = new Set(['id', 'status', 'meta', 'enviados', 'entregues', 'visualizados', 'nao_enviados', 'positivos', 'negativos', 'aguardando', 'data_inicio', 'data_fim', 'created_at'])
 
     return {
       title: titleMap[dataIndex] || dataIndex.toUpperCase(),

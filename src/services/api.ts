@@ -1,4 +1,4 @@
-import axios, { AxiosInstance } from 'axios'
+import axios, { AxiosError, AxiosInstance, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { LoginRequest, LoginResponse, User, IntegracaoConfig } from '../types'
 
 export interface ApiResponse<T> {
@@ -49,10 +49,10 @@ class ApiService {
     })
 
     // Interceptor para adicionar token
-    this.api.interceptors.request.use((config) => {
+    this.api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
       const token = localStorage.getItem('token')
       if (token) {
-        config.headers.Authorization = `Bearer ${token}`
+        ;(config.headers as any).Authorization = `Bearer ${token}`
       }
       const isLogin = String(config.url || '').includes('/auth/login')
       const hasExplicitTenant = !!(config.headers && (config.headers as any)['X-Tenant'])
@@ -76,8 +76,8 @@ class ApiService {
 
     // Interceptor para tratar erros
     this.api.interceptors.response.use(
-      (response) => response,
-      (error) => {
+      (response: AxiosResponse) => response,
+      (error: AxiosError) => {
         if (error.response?.status === 401) {
           localStorage.removeItem('token')
           localStorage.removeItem('user')
@@ -227,7 +227,7 @@ class ApiService {
   async listPerfil(): Promise<{ rows: any[]; columns: string[] }> {
     const currentSlug = (localStorage.getItem('tenantSlug') || 'captar').toLowerCase()
     // fetch current tenant
-    const cur = await this.api.get('/perfil').then(r => r.data).catch(async () => {
+    const cur = await this.api.get('/perfil').then((r: any) => r.data).catch(async () => {
       const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
       return (await fb.get('/perfil')).data
     })
@@ -237,7 +237,7 @@ class ApiService {
     const token = localStorage.getItem('token')
     if (token) hdr['Authorization'] = `Bearer ${token}`
     const alt = axios.create({ baseURL: API_BASE_URL, headers: hdr })
-    const cap = await alt.get('/perfil').then(r => r.data).catch(async () => {
+    const cap = await alt.get('/perfil').then((r: any) => r.data).catch(async () => {
       const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: hdr })
       return (await fb.get('/perfil')).data
     })
@@ -293,7 +293,7 @@ class ApiService {
 
   async listFuncoes(): Promise<{ rows: any[]; columns: string[] }> {
     const currentSlug = (localStorage.getItem('tenantSlug') || 'captar').toLowerCase()
-    const cur = await this.api.get('/funcoes').then(r => r.data).catch(async () => {
+    const cur = await this.api.get('/funcoes').then((r: any) => r.data).catch(async () => {
       const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: { 'Content-Type': 'application/json' } })
       return (await fb.get('/funcoes')).data
     })
@@ -302,7 +302,7 @@ class ApiService {
     const token = localStorage.getItem('token')
     if (token) hdr['Authorization'] = `Bearer ${token}`
     const alt = axios.create({ baseURL: API_BASE_URL, headers: hdr })
-    const cap = await alt.get('/funcoes').then(r => r.data).catch(async () => {
+    const cap = await alt.get('/funcoes').then((r: any) => r.data).catch(async () => {
       const fb = axios.create({ baseURL: 'http://localhost:8001/api', headers: hdr })
       return (await fb.get('/funcoes')).data
     })
@@ -572,6 +572,8 @@ class ApiService {
           { name: 'data_fim', type: 'date', nullable: true },
           { name: 'meta', type: 'integer', nullable: true },
           { name: 'enviados', type: 'integer', nullable: true },
+          { name: 'entregues', type: 'integer', nullable: true },
+          { name: 'visualizados', type: 'integer', nullable: true },
           { name: 'nao_enviados', type: 'integer', nullable: true },
           { name: 'positivos', type: 'integer', nullable: true },
           { name: 'negativos', type: 'integer', nullable: true },

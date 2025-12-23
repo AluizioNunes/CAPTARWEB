@@ -188,13 +188,35 @@ def _normalize_campanha_imagem(raw: str, tid: int) -> Optional[str]:
 def get_db_connection(dsn: str | None = None):
     use_dsn = (dsn.strip() if (dsn and dsn.strip()) else f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
     conn = None
+    pool = None
+    pooled = False
     try:
-        conn = psycopg.connect(use_dsn)
+        pool = _get_pool(use_dsn) if ConnectionPool else None
+        if pool is not None:
+            conn = pool.getconn()
+            pooled = True
+            try:
+                if not conn.autocommit:
+                    conn.rollback()
+            except Exception:
+                pass
+        else:
+            conn = psycopg.connect(use_dsn)
     except Exception:
         if not dsn:
             try:
                 alt_dsn = f"postgresql://{DB_USER}:{DB_PASSWORD}@postgres:{DB_PORT}/{DB_NAME}"
-                conn = psycopg.connect(alt_dsn)
+                pool = _get_pool(alt_dsn) if ConnectionPool else None
+                if pool is not None:
+                    conn = pool.getconn()
+                    pooled = True
+                    try:
+                        if not conn.autocommit:
+                            conn.rollback()
+                    except Exception:
+                        pass
+                else:
+                    conn = psycopg.connect(alt_dsn)
                 use_dsn = alt_dsn
             except Exception:
                 raise
@@ -207,7 +229,13 @@ def get_db_connection(dsn: str | None = None):
         yield conn
         try:
             if not conn.autocommit:
-                conn.commit()
+                try:
+                    conn.commit()
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
         except Exception:
             pass
     except Exception:
@@ -218,10 +246,25 @@ def get_db_connection(dsn: str | None = None):
             pass
         raise
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        if conn is not None:
+            if pooled and pool is not None:
+                try:
+                    if not conn.autocommit:
+                        conn.rollback()
+                except Exception:
+                    pass
+                try:
+                    pool.putconn(conn)
+                except Exception:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
 _DSN_CACHE: Dict[str, Tuple[str, float]] = {}
 _DSN_TTL_SECONDS = 300
@@ -467,6 +510,10 @@ def _get_evolution_base_url(conn) -> str:
             if row2 and row2[0]:
                 return str(row2[0]).strip().rstrip("/")
     except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         pass
     return "http://evolution_api:4000"
 
@@ -535,6 +582,10 @@ def _get_evolution_instance(conn, instance_id: Optional[Union[str, int]]) -> Dic
                 )
                 row = cursor.fetchone()
             except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 row = None
         if not row:
             cursor.execute(
@@ -600,6 +651,8 @@ async def integracoes_evolution_instances():
     except HTTPException:
         raise
     except Exception as e:
+        if "too many clients" in str(e).lower():
+            raise HTTPException(status_code=503, detail="Banco de dados sem conexões disponíveis (too many clients).")
         raise HTTPException(status_code=500, detail=str(e))
 
 class WhatsAppSendRequest(BaseModel):
@@ -619,26 +672,56 @@ def _extract_evolution_message_id(payload: Any) -> str:
         if isinstance(payload, str):
             return payload.strip()
         if isinstance(payload, dict):
-            for k in ('messageId', 'message_id', 'id'):
-                v = payload.get(k)
+            def _pick_str(v: Any) -> str:
                 if isinstance(v, str) and v.strip():
                     return v.strip()
-            key = payload.get('key')
-            if isinstance(key, dict):
-                v = key.get('id')
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
+                return ''
+
+            def _get_path(obj: Any, path: Tuple[str, ...]) -> str:
+                cur: Any = obj
+                for k in path:
+                    if not isinstance(cur, dict):
+                        return ''
+                    cur = cur.get(k)
+                return _pick_str(cur)
+
+            for path in (
+                ('key', 'id'),
+                ('data', 'key', 'id'),
+                ('payload', 'key', 'id'),
+                ('event', 'key', 'id'),
+                ('data', 'message', 'key', 'id'),
+                ('message', 'key', 'id'),
+                ('data', 'keyId'),
+                ('data', 'key_id'),
+                ('keyId',),
+                ('key_id',),
+                ('data', 'messageId'),
+                ('data', 'message_id'),
+                ('messageId',),
+                ('message_id',),
+            ):
+                v = _get_path(payload, path)
+                if v:
+                    return v
+
             data = payload.get('data') or payload.get('payload')
             if isinstance(data, dict):
-                for k in ('messageId', 'message_id', 'id'):
-                    v = data.get(k)
-                    if isinstance(v, str) and v.strip():
-                        return v.strip()
-                key2 = data.get('key')
-                if isinstance(key2, dict):
-                    v = key2.get('id')
-                    if isinstance(v, str) and v.strip():
-                        return v.strip()
+                v = _get_path(data, ('key', 'id'))
+                if v:
+                    return v
+                for k in ('keyId', 'key_id', 'messageId', 'message_id'):
+                    v2 = _pick_str(data.get(k))
+                    if v2:
+                        return v2
+
+            v = _pick_str(payload.get('id'))
+            if v:
+                return v
+            if isinstance(data, dict):
+                v = _pick_str(data.get('id'))
+                if v:
+                    return v
         return ''
     except Exception:
         return ''
@@ -683,9 +766,19 @@ def _extract_evolution_status(payload: Any) -> Tuple[Optional[str], Optional[int
             candidates = []
             if data:
                 candidates.extend([data.get('status'), data.get('ack')])
+                upd = data.get('update')
+                if isinstance(upd, dict):
+                    candidates.extend([upd.get('status'), upd.get('ack')])
+                receipt = data.get('receipt') or data.get('receiptUpdate')
+                if isinstance(receipt, dict):
+                    candidates.extend([receipt.get('status'), receipt.get('ack')])
+                candidates.extend([data.get('messageStatus'), data.get('message_status')])
                 msg = data.get('message')
                 if isinstance(msg, dict):
                     candidates.extend([msg.get('status'), msg.get('ack')])
+                    upd2 = msg.get('update')
+                    if isinstance(upd2, dict):
+                        candidates.extend([upd2.get('status'), upd2.get('ack')])
             candidates.extend([payload.get('status'), payload.get('ack')])
 
             for v in candidates:
@@ -808,6 +901,42 @@ async def send_whatsapp_message(data: WhatsAppSendRequest, request: Request):
                                     print(f"Evolution API Error (Text): {resp_text.status} - {text}")
                                     code = resp_text.status if resp_text.status < 500 else 502
                                     raise HTTPException(status_code=code, detail=f"Erro na API WhatsApp (Texto): {text}")
+                                try:
+                                    resp_text_json = await resp_text.json()
+                                except Exception:
+                                    try:
+                                        resp_text_json = {"raw": await resp_text.text()}
+                                    except Exception:
+                                        resp_text_json = {"raw": ""}
+                                try:
+                                    message_id_text = _extract_evolution_message_id(resp_text_json) or None
+                                    with get_conn_for_request(request) as conn_log:
+                                        cursor_log = conn_log.cursor()
+                                        tid_log = _tenant_id_from_header(request)
+                                        cursor_log.execute(
+                                            f"""
+                                            INSERT INTO "{DB_SCHEMA}"."Disparos"
+                                            ("IdTenant","IdCampanha","Canal","Direcao","Numero","Nome","Mensagem","Imagem","Status","DataHora","Payload","MessageId","EvolutionInstance")
+                                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW() AT TIME ZONE 'UTC',%s::jsonb,%s,%s)
+                                            """,
+                                            (
+                                                tid_log,
+                                                data.campanha_id,
+                                                'WHATSAPP',
+                                                'OUT',
+                                                _digits_only(data.phone),
+                                                (data.contato_nome or None),
+                                                msg,
+                                                None,
+                                                'ENVIADO',
+                                                json.dumps(resp_text_json, ensure_ascii=False),
+                                                message_id_text,
+                                                str(instance or '').strip() or None,
+                                            ),
+                                        )
+                                        conn_log.commit()
+                                except Exception:
+                                    pass
                         
                         url_media = f"{base_try}/message/sendMedia/{instance}"
                         print(f"Sending WhatsApp MEDIA (TOP) to URL: {url_media}")
@@ -1026,8 +1155,21 @@ async def whatsapp_check_numbers(payload: WhatsAppNumbersCheckRequest, request: 
     try:
         try:
             with get_conn_for_request(request) as conn:
-                evo = _get_evolution_instance(conn, payload.evolution_api_id)
-                base_url = _get_evolution_base_url(conn)
+                try:
+                    if not conn.autocommit:
+                        conn.rollback()
+                except Exception:
+                    pass
+                prev_autocommit = conn.autocommit
+                conn.autocommit = True
+                try:
+                    evo = _get_evolution_instance(conn, payload.evolution_api_id)
+                    base_url = _get_evolution_base_url(conn)
+                finally:
+                    try:
+                        conn.autocommit = prev_autocommit
+                    except Exception:
+                        pass
         except HTTPException as he:
             detail = str(getattr(he, "detail", "") or "")
             if he.status_code == 500 and (
@@ -1057,7 +1199,7 @@ async def whatsapp_check_numbers(payload: WhatsAppNumbersCheckRequest, request: 
             return {"rows": [], "instance": instance}
 
         headers = {"apikey": api_key, "Content-Type": "application/json"}
-        last_err = None
+        last_err: Any = None
         async with aiohttp.ClientSession() as session:
             for base_try in base_candidates:
                 try:
@@ -1065,8 +1207,8 @@ async def whatsapp_check_numbers(payload: WhatsAppNumbersCheckRequest, request: 
                     async with session.post(url, json={"numbers": nums}, headers=headers, timeout=30) as resp:
                         raw = await resp.text()
                         if resp.status not in (200, 201):
-                            code = resp.status if resp.status < 500 else 502
-                            raise HTTPException(status_code=code, detail=f"Erro na Evolution API: {raw}")
+                            last_err = raw
+                            continue
                         try:
                             data = json.loads(raw) if raw else {}
                         except Exception:
@@ -1103,9 +1245,7 @@ async def whatsapp_check_numbers(payload: WhatsAppNumbersCheckRequest, request: 
                 except (aiohttp.ClientConnectorError, aiohttp.ClientConnectionError, asyncio.TimeoutError, OSError) as ce:
                     last_err = ce
                     continue
-        if last_err:
-            raise HTTPException(status_code=502, detail=f"Falha ao conectar na Evolution API. BaseUrl={base_url}. Tentativas={base_candidates}. Erro={str(last_err)}")
-        raise HTTPException(status_code=502, detail="Falha ao consultar números do WhatsApp.")
+        return {"rows": [], "instance": instance}
     except HTTPException:
         raise
     except Exception as e:
@@ -1399,6 +1539,7 @@ def _campanha_disparos_grid(
             "resposta_datahora": None,
             "resposta_classificacao": None,
             "resposta_texto": None,
+            "__envio_src__": None,
         }
         by_num[numero] = ent
         k11 = numero[-11:] if len(numero) > 11 else numero
@@ -1440,12 +1581,14 @@ def _campanha_disparos_grid(
                 cur_dt = _to_utc_naive(ent.get('envio_datahora')) if isinstance(ent.get('envio_datahora'), datetime) else None
                 if sent_dt and (cur_dt is None or sent_dt >= cur_dt):
                     ent['envio_datahora'] = sent_dt
+                    ent['__envio_src__'] = 'ANEXO'
             elif status_val == 'error':
                 if not ent.get('envio_status'):
                     ent['envio_status'] = 'FALHA'
                 sent_dt = _parse_iso_dt(c.get('enviado_em') or c.get('enviadoEm') or c.get('sent_at') or c.get('sentAt'))
                 if sent_dt and ent.get('envio_datahora') is None:
                     ent['envio_datahora'] = sent_dt
+                    ent['__envio_src__'] = 'ANEXO'
 
             resposta_val = c.get('resposta')
             if resposta_val is None:
@@ -1477,11 +1620,11 @@ def _campanha_disparos_grid(
                "EntregueEm" as entregue_em,
                "VisualizadoEm" as visualizado_em,
                COALESCE(
-                 NULLIF("MessageId",''),
                  NULLIF("Payload"->>'keyId',''),
                  NULLIF("Payload"->'key'->>'id',''),
                  NULLIF("Payload"->'data'->>'keyId',''),
                  NULLIF("Payload"->'data'->'key'->>'id',''),
+                 NULLIF("MessageId",''),
                  NULLIF("Payload"->>'messageId',''),
                  NULLIF("Payload"->'data'->>'messageId',''),
                  NULLIF("Payload"->>'id',''),
@@ -1517,136 +1660,43 @@ def _campanha_disparos_grid(
             msg_ids_needed.append(mid)
 
         if msg_ids_needed:
+            delivered_ts, read_ts = _load_messageupdate_receipts(cursor, msg_ids=msg_ids_needed)
+            _apply_receipts_to_disparos(cursor, tid=int(tid), delivered_ts=delivered_ts, read_ts=read_ts, campanha_id=int(campanha_id))
+            try:
+                cursor.connection.commit()
+            except Exception:
+                pass
             cursor.execute(
-                """
-                SELECT "keyId", "messageId", status, COALESCE("updatedAt","createdAt") as ts
-                FROM "EvolutionAPI"."MessageUpdate"
-                WHERE status IN ('DELIVERY_ACK','READ')
-                  AND ("keyId" = ANY(%s) OR "messageId" = ANY(%s))
+                f"""
+                SELECT "Direcao" as direcao,
+                       "Numero" as numero,
+                       "Nome" as nome,
+                       "Status" as status,
+                       "DataHora" as datahora,
+                       "Mensagem" as mensagem,
+                       "RespostaClassificacao" as resposta,
+                       "EntregueEm" as entregue_em,
+                       "VisualizadoEm" as visualizado_em,
+                       COALESCE(
+                         NULLIF("Payload"->>'keyId',''),
+                         NULLIF("Payload"->'key'->>'id',''),
+                         NULLIF("Payload"->'data'->>'keyId',''),
+                         NULLIF("Payload"->'data'->'key'->>'id',''),
+                         NULLIF("MessageId",''),
+                         NULLIF("Payload"->>'messageId',''),
+                         NULLIF("Payload"->'data'->>'messageId',''),
+                         NULLIF("Payload"->>'id',''),
+                         NULLIF("Payload"->'data'->>'id','')
+                       ) as message_id
+                FROM "{DB_SCHEMA}"."Disparos"
+                WHERE "IdTenant" = %s AND "IdCampanha" = %s
+                ORDER BY "IdDisparo" ASC
+                LIMIT %s
                 """,
-                (msg_ids_needed, msg_ids_needed),
+                (int(tid), int(campanha_id), int(limit_logs)),
             )
-            for key_id, message_id, st, ts in cursor.fetchall() or []:
-                s = str(st or '').upper()
-                if s not in ('DELIVERY_ACK', 'READ'):
-                    continue
-                ts_dt = _to_utc_naive(ts) if isinstance(ts, datetime) else None
-                if not ts_dt:
-                    continue
-
-                ids: List[str] = []
-                if isinstance(key_id, str) and key_id.strip() and key_id.strip() in seen_mid:
-                    ids.append(key_id.strip())
-                if isinstance(message_id, str) and message_id.strip() and message_id.strip() in seen_mid:
-                    ids.append(message_id.strip())
-
-                for mid in ids:
-                    if s == 'DELIVERY_ACK':
-                        prev = delivered_ts.get(mid)
-                        if prev is None or ts_dt < prev:
-                            delivered_ts[mid] = ts_dt
-                    elif s == 'READ':
-                        prev_r = read_ts.get(mid)
-                        if prev_r is None or ts_dt < prev_r:
-                            read_ts[mid] = ts_dt
-
-            if delivered_ts or read_ts:
-                read_list = list(sorted(read_ts.keys()))
-                delivered_only = list(sorted(set(delivered_ts.keys()) - set(read_ts.keys())))
-                if read_list:
-                    read_times = [read_ts.get(x) for x in read_list]
-                    delivered_times_for_read = [delivered_ts.get(x) for x in read_list]
-                    cursor.execute(
-                        f"""
-                        WITH upd AS (
-                          SELECT * FROM UNNEST(%s::text[], %s::timestamp[], %s::timestamp[]) AS t(message_id, read_ts, delivered_ts)
-                        )
-                        UPDATE "{DB_SCHEMA}"."Disparos" d
-                        SET "EntregueEm" = CASE
-                              WHEN d."EntregueEm" IS NULL THEN COALESCE(upd.delivered_ts, upd.read_ts)
-                              WHEN d."EntregueEm" = d."VisualizadoEm" AND upd.delivered_ts IS NOT NULL AND upd.delivered_ts <> d."EntregueEm" THEN upd.delivered_ts
-                              ELSE d."EntregueEm"
-                            END,
-                            "VisualizadoEm" = CASE
-                              WHEN d."VisualizadoEm" IS NULL THEN upd.read_ts
-                              WHEN d."EntregueEm" IS NOT NULL AND d."VisualizadoEm" = d."EntregueEm" AND upd.read_ts IS NOT NULL AND upd.read_ts <> d."VisualizadoEm" THEN upd.read_ts
-                              ELSE d."VisualizadoEm"
-                            END,
-                            "MessageId" = CASE
-                              WHEN d."MessageId" IS NULL OR d."MessageId" = '' THEN upd.message_id
-                              ELSE d."MessageId"
-                            END,
-                            "Status" = CASE
-                              WHEN UPPER(COALESCE(d."Status", '')) = 'FALHA' THEN d."Status"
-                              WHEN UPPER(COALESCE(d."Status", '')) = 'VISUALIZADO' THEN d."Status"
-                              ELSE 'VISUALIZADO'
-                            END
-                        FROM upd
-                        WHERE d."IdTenant" = %s
-                          AND d."Canal" = 'WHATSAPP'
-                          AND d."Direcao" = 'OUT'
-                          AND (
-                            d."MessageId" = upd.message_id
-                            OR COALESCE(
-                              NULLIF(d."Payload"->>'keyId',''),
-                              NULLIF(d."Payload"->'key'->>'id',''),
-                              NULLIF(d."Payload"->'data'->>'keyId',''),
-                              NULLIF(d."Payload"->'data'->'key'->>'id',''),
-                              NULLIF(d."Payload"->>'messageId',''),
-                              NULLIF(d."Payload"->'data'->>'messageId',''),
-                              NULLIF(d."Payload"->>'id',''),
-                              NULLIF(d."Payload"->'data'->>'id','')
-                            ) = upd.message_id
-                          )
-                        """,
-                        (read_list, read_times, delivered_times_for_read, int(tid)),
-                    )
-                if delivered_only:
-                    delivered_times = [delivered_ts.get(x) for x in delivered_only]
-                    cursor.execute(
-                        f"""
-                        WITH upd AS (
-                          SELECT * FROM UNNEST(%s::text[], %s::timestamp[]) AS t(message_id, delivered_ts)
-                        )
-                        UPDATE "{DB_SCHEMA}"."Disparos" d
-                        SET "EntregueEm" = CASE
-                              WHEN d."EntregueEm" IS NULL THEN upd.delivered_ts
-                              WHEN d."EntregueEm" = d."VisualizadoEm" AND upd.delivered_ts IS NOT NULL AND upd.delivered_ts <> d."EntregueEm" THEN upd.delivered_ts
-                              ELSE d."EntregueEm"
-                            END,
-                            "MessageId" = CASE
-                              WHEN d."MessageId" IS NULL OR d."MessageId" = '' THEN upd.message_id
-                              ELSE d."MessageId"
-                            END,
-                            "Status" = CASE
-                              WHEN UPPER(COALESCE(d."Status", '')) = 'FALHA' THEN d."Status"
-                              WHEN UPPER(COALESCE(d."Status", '')) IN ('VISUALIZADO','ENTREGUE') THEN d."Status"
-                              ELSE 'ENTREGUE'
-                            END
-                        FROM upd
-                        WHERE d."IdTenant" = %s
-                          AND d."Canal" = 'WHATSAPP'
-                          AND d."Direcao" = 'OUT'
-                          AND (
-                            d."MessageId" = upd.message_id
-                            OR COALESCE(
-                              NULLIF(d."Payload"->>'keyId',''),
-                              NULLIF(d."Payload"->'key'->>'id',''),
-                              NULLIF(d."Payload"->'data'->>'keyId',''),
-                              NULLIF(d."Payload"->'data'->'key'->>'id',''),
-                              NULLIF(d."Payload"->>'messageId',''),
-                              NULLIF(d."Payload"->'data'->>'messageId',''),
-                              NULLIF(d."Payload"->>'id',''),
-                              NULLIF(d."Payload"->'data'->>'id','')
-                            ) = upd.message_id
-                          )
-                        """,
-                        (delivered_only, delivered_times, int(tid)),
-                    )
-                try:
-                    cursor.connection.commit()
-                except Exception:
-                    pass
+            disp_rows = cursor.fetchall()
+            disp_cols = [d[0] for d in cursor.description]
     except Exception:
         try:
             cursor.connection.rollback()
@@ -1673,9 +1723,14 @@ def _campanha_disparos_grid(
 
         if direcao == 'OUT':
             cur_dt = ent.get('envio_datahora')
-            if (cur_dt is None) or (isinstance(datahora, datetime) and isinstance(cur_dt, datetime) and datahora >= cur_dt) or (cur_dt is None and datahora):
+            envio_src = str(ent.get('__envio_src__') or '')
+            is_newer_send = (cur_dt is None) or (envio_src == 'ANEXO') or (isinstance(datahora, datetime) and isinstance(cur_dt, datetime) and datahora >= cur_dt) or (cur_dt is None and datahora)
+            if is_newer_send:
                 ent['envio_datahora'] = datahora
                 ent['envio_status'] = status or '—'
+                ent['entregue_em'] = None
+                ent['visualizado_em'] = None
+                ent['__envio_src__'] = 'DISPAROS'
             d_ent = d.get('entregue_em')
             if isinstance(d_ent, datetime):
                 d_ent = _to_utc_naive(d_ent)
@@ -1683,7 +1738,7 @@ def _campanha_disparos_grid(
             if isinstance(d_vis, datetime):
                 d_vis = _to_utc_naive(d_vis)
             mid = str(d.get('message_id') or '').strip()
-            if mid:
+            if mid and is_newer_send:
                 rts = read_ts.get(mid)
                 dts = delivered_ts.get(mid)
                 if d_vis is None and rts is not None:
@@ -1697,24 +1752,28 @@ def _campanha_disparos_grid(
                     d_vis = rts
                 if d_vis is not None and d_ent is not None and d_vis == d_ent and dts is not None and dts != d_ent:
                     d_ent = dts
-            cur_ent = ent.get('entregue_em')
-            cur_vis0 = ent.get('visualizado_em')
-            if cur_ent is None and d_ent:
-                ent['entregue_em'] = d_ent
-            elif cur_ent and cur_vis0 and cur_ent == cur_vis0 and d_ent and d_ent != cur_ent:
-                ent['entregue_em'] = d_ent
-            cur_vis = ent.get('visualizado_em')
-            if cur_vis is None and d_vis:
-                ent['visualizado_em'] = d_vis
-            try:
-                cur_status = str(ent.get('envio_status') or '').upper()
-                if cur_status != 'FALHA':
-                    if ent.get('visualizado_em'):
-                        ent['envio_status'] = 'VISUALIZADO'
-                    elif ent.get('entregue_em'):
-                        ent['envio_status'] = 'ENTREGUE'
-            except Exception:
-                pass
+            if is_newer_send and isinstance(ent.get('envio_datahora'), datetime):
+                envio_dt = _to_utc_naive(ent.get('envio_datahora'))
+                if isinstance(d_ent, datetime) and envio_dt and d_ent < envio_dt:
+                    d_ent = envio_dt
+                if isinstance(d_vis, datetime):
+                    floor_dt = d_ent if isinstance(d_ent, datetime) else envio_dt
+                    if floor_dt and d_vis < floor_dt:
+                        d_vis = floor_dt
+            if is_newer_send:
+                if d_ent is not None:
+                    ent['entregue_em'] = d_ent
+                if d_vis is not None:
+                    ent['visualizado_em'] = d_vis
+                try:
+                    cur_status = str(ent.get('envio_status') or '').upper()
+                    if cur_status != 'FALHA':
+                        if ent.get('visualizado_em'):
+                            ent['envio_status'] = 'VISUALIZADO'
+                        elif ent.get('entregue_em'):
+                            ent['envio_status'] = 'ENTREGUE'
+                except Exception:
+                    pass
         elif direcao == 'IN':
             cur_dt = ent.get('resposta_datahora')
             if (cur_dt is None) or (isinstance(datahora, datetime) and isinstance(cur_dt, datetime) and datahora >= cur_dt) or (cur_dt is None and datahora):
@@ -1738,6 +1797,14 @@ def _campanha_disparos_grid(
             ent['resposta_classificacao'] = 'AGUARDANDO'
         if not ent.get('resposta_texto'):
             ent['resposta_texto'] = '—'
+        ent.pop('__envio_src__', None)
+        try:
+            entg = ent.get('entregue_em')
+            vis = ent.get('visualizado_em')
+            if isinstance(entg, datetime) and isinstance(vis, datetime) and vis < entg:
+                ent['entregue_em'] = vis
+        except Exception:
+            pass
         for k, v in list(ent.items()):
             ent[k] = _attach_utc(v)
         linhas.append(ent)
@@ -2109,11 +2176,19 @@ def _build_comprovante_pdf_bytes(
     cfg_pdf = (anexo_obj_pdf.get('config') if isinstance(anexo_obj_pdf, dict) else None) if isinstance(anexo_obj_pdf, dict) else None
     aguardar_respostas_pdf = str((cfg_pdf or {}).get('response_mode') or '').strip().upper() == 'SIM_NAO' if isinstance(cfg_pdf, dict) else False
 
-    header = ['NOME', 'NÚMERO', 'ENVIO (DATA/HORA)', 'STATUS ENVIO', 'ENTREGUE', 'VISUALIZADO']
+    header = ['NOME', 'NÚMERO', 'ENVIO (DATA/HORA)', 'STATUS ENVIO', 'ENTREGUE', 'VISUALIZADO', 'STATUS DA MENSAGEM']
     if aguardar_respostas_pdf:
         header.extend(['RESPOSTA', 'RESPOSTA (DATA/HORA)'])
     data_rows: List[List[Any]] = [header]
     for it in linhas:
+        recebido = bool(it.get('entregue_em'))
+        visualizado = bool(it.get('visualizado_em'))
+        if not recebido:
+            msg_status = 'NÃO RECEBIDO'
+        elif visualizado:
+            msg_status = 'RECEBIDO / VISUALIZADO'
+        else:
+            msg_status = 'RECEBIDO / AGUARDANDO VISUALIZAÇÃO'
         row = [
             Paragraph(_truncate_text(it.get('nome') or '—', 60) or '—', style_normal),
             Paragraph(_truncate_text(it.get('numero') or '', 30) or '—', style_normal),
@@ -2121,6 +2196,7 @@ def _build_comprovante_pdf_bytes(
             Paragraph(str(it.get('envio_status') or '—').upper(), style_normal),
             Paragraph(_format_dt_br(it.get('entregue_em') or ''), style_normal),
             Paragraph(_format_dt_br(it.get('visualizado_em') or ''), style_normal),
+            Paragraph(_truncate_text(msg_status, 40) or msg_status, style_normal),
         ]
         if aguardar_respostas_pdf:
             row.extend([
@@ -2131,9 +2207,9 @@ def _build_comprovante_pdf_bytes(
 
     avail_w = float(getattr(doc, 'width', 0.0) or 0.0)
     if aguardar_respostas_pdf:
-        col_widths = [avail_w * 0.22, avail_w * 0.14, avail_w * 0.12, avail_w * 0.10, avail_w * 0.12, avail_w * 0.12, avail_w * 0.08, avail_w * 0.10]
+        col_widths = [avail_w * 0.20, avail_w * 0.12, avail_w * 0.11, avail_w * 0.09, avail_w * 0.10, avail_w * 0.10, avail_w * 0.11, avail_w * 0.07, avail_w * 0.10]
     else:
-        col_widths = [avail_w * 0.28, avail_w * 0.16, avail_w * 0.18, avail_w * 0.12, avail_w * 0.13, avail_w * 0.13]
+        col_widths = [avail_w * 0.24, avail_w * 0.14, avail_w * 0.15, avail_w * 0.10, avail_w * 0.11, avail_w * 0.11, avail_w * 0.15]
     table = Table(data_rows, colWidths=col_widths, repeatRows=1)
     table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1f2937')),
@@ -2338,18 +2414,20 @@ def _extract_evolution_datetime(payload: Any) -> Optional[datetime]:
             candidates = []
             if isinstance(data, dict):
                 candidates.extend([
-                    data.get('messageTimestamp'),
+                    data.get('date_time'),
                     data.get('timestamp'),
                     data.get('t'),
+                    data.get('messageTimestamp'),
                 ])
                 msg = data.get('message')
                 if isinstance(msg, dict):
                     candidates.extend([
-                        msg.get('messageTimestamp'),
+                        msg.get('date_time'),
                         msg.get('timestamp'),
                         msg.get('t'),
+                        msg.get('messageTimestamp'),
                     ])
-            candidates.extend([payload.get('messageTimestamp'), payload.get('timestamp'), payload.get('t')])
+            candidates.extend([payload.get('date_time'), payload.get('timestamp'), payload.get('t'), payload.get('messageTimestamp')])
 
             for v in candidates:
                 if v is None:
@@ -2363,15 +2441,237 @@ def _extract_evolution_datetime(payload: Any) -> Optional[datetime]:
                     try:
                         ts = float(s)
                     except Exception:
+                        dt = _parse_iso_dt(s)
+                        if dt:
+                            return dt
                         continue
                 if ts > 10_000_000_000:
                     ts = ts / 1000.0
                 if ts <= 0:
                     continue
-                return datetime.utcfromtimestamp(ts)
+                return datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None)
         return None
     except Exception:
         return None
+
+def _load_messageupdate_receipts(cursor, *, msg_ids: List[str]) -> Tuple[Dict[str, datetime], Dict[str, datetime]]:
+    delivered_ts: Dict[str, datetime] = {}
+    read_ts: Dict[str, datetime] = {}
+    if not msg_ids:
+        return delivered_ts, read_ts
+
+    def _cuid_dt(v: Any) -> Optional[datetime]:
+        try:
+            s = str(v or '').strip()
+            if not s.startswith('c') or len(s) < 10:
+                return None
+            ts36 = s[1:9]
+            ts_ms = int(ts36, 36)
+            if ts_ms <= 0:
+                return None
+            return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).replace(tzinfo=None)
+        except Exception:
+            return None
+
+    rows: List[Tuple[Any, Any, Any, Any, Any, Any]] = []
+    try:
+        cursor.execute(
+            """
+            SELECT mu.id, mu."keyId", mu."messageId", mu.status, m."messageTimestamp" as message_ts, mu."createdAt" as created_at
+            FROM "EvolutionAPI"."MessageUpdate" mu
+            LEFT JOIN "EvolutionAPI"."Message" m
+              ON m.id = mu."messageId"
+            WHERE (mu."keyId" = ANY(%s) OR mu."messageId" = ANY(%s))
+            """,
+            (msg_ids, msg_ids),
+        )
+        rows = cursor.fetchall() or []
+    except Exception:
+        cursor.execute(
+            """
+            SELECT mu.id, mu."keyId", mu."messageId", mu.status, m."messageTimestamp" as message_ts
+            FROM "EvolutionAPI"."MessageUpdate" mu
+            LEFT JOIN "EvolutionAPI"."Message" m
+              ON m.id = mu."messageId"
+            WHERE (mu."keyId" = ANY(%s) OR mu."messageId" = ANY(%s))
+            """,
+            (msg_ids, msg_ids),
+        )
+        rows = [(a, b, c, d, e, None) for (a, b, c, d, e) in (cursor.fetchall() or [])]
+    seen_mid = set([str(x or '').strip() for x in msg_ids if str(x or '').strip()])
+    for mu_id, key_id, message_id, st, message_ts, created_at in rows:
+        s = str(st or '').upper()
+        ts_dt: Optional[datetime] = None
+        if created_at is not None:
+            if isinstance(created_at, datetime):
+                ts_dt = created_at.replace(tzinfo=None) if created_at.tzinfo is not None else created_at
+            else:
+                ts_dt = _parse_iso_dt(created_at)
+        if ts_dt is None:
+            ts_dt = _cuid_dt(mu_id)
+        if ts_dt is None and isinstance(message_ts, (int, float)):
+            ts_val = float(message_ts)
+            if ts_val > 10_000_000_000:
+                ts_val = ts_val / 1000.0
+            if ts_val > 0:
+                ts_dt = datetime.fromtimestamp(ts_val, tz=timezone.utc).replace(tzinfo=None)
+        if not ts_dt:
+            continue
+        ids: List[str] = []
+        if isinstance(key_id, str) and key_id.strip() and key_id.strip() in seen_mid:
+            ids.append(key_id.strip())
+        if isinstance(message_id, str) and message_id.strip() and message_id.strip() in seen_mid:
+            ids.append(message_id.strip())
+        if not ids:
+            continue
+        ack: Optional[int] = None
+        if isinstance(st, (int, float)):
+            try:
+                ack = int(st)
+            except Exception:
+                ack = None
+        elif s.isdigit():
+            try:
+                ack = int(s)
+            except Exception:
+                ack = None
+
+        is_read = (ack is not None and ack >= 3) or ('READ' in s) or ('SEEN' in s) or ('VISUAL' in s)
+        is_delivered = (ack is not None and ack >= 2) or is_read or ('DELIVER' in s) or ('RECEIV' in s) or (s in ('DELIVERY_ACK', 'DELIVERED', 'DELIVERY'))
+        if not is_delivered and not is_read:
+            continue
+        for mid in ids:
+            if is_delivered:
+                prev = delivered_ts.get(mid)
+                if prev is None or ts_dt > prev:
+                    delivered_ts[mid] = ts_dt
+            if is_read:
+                prev_r = read_ts.get(mid)
+                if prev_r is None or ts_dt > prev_r:
+                    read_ts[mid] = ts_dt
+    return delivered_ts, read_ts
+
+def _apply_receipts_to_disparos(
+    cursor,
+    *,
+    tid: int,
+    delivered_ts: Dict[str, datetime],
+    read_ts: Dict[str, datetime],
+    campanha_id: Optional[int] = None,
+) -> None:
+    if not delivered_ts and not read_ts:
+        return
+    read_list = list(sorted(read_ts.keys()))
+    delivered_only = list(sorted(set(delivered_ts.keys()) - set(read_ts.keys())))
+    if read_list:
+        read_times = [read_ts.get(x) for x in read_list]
+        delivered_times_for_read = [delivered_ts.get(x) for x in read_list]
+        where_campanha = 'AND d."IdCampanha" = %s' if campanha_id is not None else ''
+        params: List[Any] = [read_list, read_times, delivered_times_for_read, int(tid)]
+        if campanha_id is not None:
+            params.append(int(campanha_id))
+        cursor.execute(
+            f"""
+            WITH upd AS (
+              SELECT * FROM UNNEST(%s::text[], %s::timestamp[], %s::timestamp[]) AS t(message_id, read_ts, delivered_ts)
+            )
+            UPDATE "{DB_SCHEMA}"."Disparos" d
+            SET "EntregueEm" = CASE
+                  WHEN COALESCE(upd.delivered_ts, upd.read_ts) IS NULL THEN d."EntregueEm"
+                  ELSE
+                    CASE
+                      WHEN d."EntregueEm" IS NULL THEN GREATEST(COALESCE(upd.delivered_ts, upd.read_ts), COALESCE(d."DataHora", COALESCE(upd.delivered_ts, upd.read_ts)))
+                      WHEN d."EntregueEm" < GREATEST(COALESCE(upd.delivered_ts, upd.read_ts), COALESCE(d."DataHora", COALESCE(upd.delivered_ts, upd.read_ts))) THEN GREATEST(COALESCE(upd.delivered_ts, upd.read_ts), COALESCE(d."DataHora", COALESCE(upd.delivered_ts, upd.read_ts)))
+                      ELSE d."EntregueEm"
+                    END
+                END,
+                "VisualizadoEm" = CASE
+                  WHEN upd.read_ts IS NULL THEN d."VisualizadoEm"
+                  ELSE
+                    CASE
+                      WHEN d."VisualizadoEm" IS NULL THEN GREATEST(upd.read_ts, COALESCE(d."DataHora", upd.read_ts), COALESCE(upd.delivered_ts, upd.read_ts, d."DataHora"), COALESCE(d."EntregueEm", d."DataHora", upd.read_ts))
+                      WHEN d."VisualizadoEm" < GREATEST(upd.read_ts, COALESCE(d."DataHora", upd.read_ts), COALESCE(upd.delivered_ts, upd.read_ts, d."DataHora"), COALESCE(d."EntregueEm", d."DataHora", upd.read_ts)) THEN GREATEST(upd.read_ts, COALESCE(d."DataHora", upd.read_ts), COALESCE(upd.delivered_ts, upd.read_ts, d."DataHora"), COALESCE(d."EntregueEm", d."DataHora", upd.read_ts))
+                      ELSE d."VisualizadoEm"
+                    END
+                END,
+                "MessageId" = CASE
+                  WHEN d."MessageId" IS NULL OR d."MessageId" = '' THEN upd.message_id
+                  ELSE d."MessageId"
+                END,
+                "Status" = CASE
+                  WHEN UPPER(COALESCE(d."Status", '')) = 'FALHA' THEN d."Status"
+                  WHEN UPPER(COALESCE(d."Status", '')) = 'VISUALIZADO' THEN d."Status"
+                  WHEN upd.read_ts IS NOT NULL THEN 'VISUALIZADO'
+                  ELSE 'ENTREGUE'
+                END
+            FROM upd
+            WHERE d."IdTenant" = %s
+              AND d."Canal" = 'WHATSAPP'
+              AND d."Direcao" = 'OUT'
+              {where_campanha}
+              AND (
+                d."MessageId" = upd.message_id
+                OR NULLIF(d."Payload"->>'keyId','') = upd.message_id
+                OR NULLIF(d."Payload"->'key'->>'id','') = upd.message_id
+                OR NULLIF(d."Payload"->'data'->>'keyId','') = upd.message_id
+                OR NULLIF(d."Payload"->'data'->'key'->>'id','') = upd.message_id
+                OR NULLIF(d."Payload"->>'messageId','') = upd.message_id
+                OR NULLIF(d."Payload"->'data'->>'messageId','') = upd.message_id
+                OR NULLIF(d."Payload"->>'id','') = upd.message_id
+                OR NULLIF(d."Payload"->'data'->>'id','') = upd.message_id
+              )
+            """,
+            tuple(params),
+        )
+    if delivered_only:
+        delivered_times = [delivered_ts.get(x) for x in delivered_only]
+        where_campanha = 'AND d."IdCampanha" = %s' if campanha_id is not None else ''
+        params2: List[Any] = [delivered_only, delivered_times, int(tid)]
+        if campanha_id is not None:
+            params2.append(int(campanha_id))
+        cursor.execute(
+            f"""
+            WITH upd AS (
+              SELECT * FROM UNNEST(%s::text[], %s::timestamp[]) AS t(message_id, delivered_ts)
+            )
+            UPDATE "{DB_SCHEMA}"."Disparos" d
+            SET "EntregueEm" = CASE
+                  WHEN upd.delivered_ts IS NULL THEN d."EntregueEm"
+                  ELSE
+                    CASE
+                      WHEN d."EntregueEm" IS NULL THEN GREATEST(upd.delivered_ts, COALESCE(d."DataHora", upd.delivered_ts))
+                      WHEN d."EntregueEm" < GREATEST(upd.delivered_ts, COALESCE(d."DataHora", upd.delivered_ts)) THEN GREATEST(upd.delivered_ts, COALESCE(d."DataHora", upd.delivered_ts))
+                      ELSE d."EntregueEm"
+                    END
+                END,
+                "MessageId" = CASE
+                  WHEN d."MessageId" IS NULL OR d."MessageId" = '' THEN upd.message_id
+                  ELSE d."MessageId"
+                END,
+                "Status" = CASE
+                  WHEN UPPER(COALESCE(d."Status", '')) = 'FALHA' THEN d."Status"
+                  WHEN UPPER(COALESCE(d."Status", '')) IN ('VISUALIZADO','ENTREGUE') THEN d."Status"
+                  ELSE 'ENTREGUE'
+                END
+            FROM upd
+            WHERE d."IdTenant" = %s
+              AND d."Canal" = 'WHATSAPP'
+              AND d."Direcao" = 'OUT'
+              {where_campanha}
+              AND (
+                d."MessageId" = upd.message_id
+                OR NULLIF(d."Payload"->>'keyId','') = upd.message_id
+                OR NULLIF(d."Payload"->'key'->>'id','') = upd.message_id
+                OR NULLIF(d."Payload"->'data'->>'keyId','') = upd.message_id
+                OR NULLIF(d."Payload"->'data'->'key'->>'id','') = upd.message_id
+                OR NULLIF(d."Payload"->>'messageId','') = upd.message_id
+                OR NULLIF(d."Payload"->'data'->>'messageId','') = upd.message_id
+                OR NULLIF(d."Payload"->>'id','') = upd.message_id
+                OR NULLIF(d."Payload"->'data'->>'id','') = upd.message_id
+              )
+            """,
+            tuple(params2),
+        )
 
 def _match_phone(stored: Any, incoming_digits: str) -> bool:
     def norm_br(d: str) -> str:
@@ -2408,7 +2708,11 @@ def _match_phone(stored: Any, incoming_digits: str) -> bool:
 @app.post("/api/integrations/whatsapp/webhook")
 async def whatsapp_webhook(payload: Dict[str, Any], request: Request, tenant: Optional[str] = None):
     try:
-        slug = (request.headers.get('X-Tenant') or tenant or 'captar').strip() or 'captar'
+        raw_slug = (request.headers.get('X-Tenant') or tenant or 'captar')
+        if not isinstance(raw_slug, str):
+            raw_slug = 'captar'
+        raw_slug = raw_slug.strip() or 'captar'
+        slug = (raw_slug.split('/', 1)[0] or 'captar').strip() or 'captar'
         try:
             rc = get_redis_client()
             cached = rc.get(f"tenant:id:{slug}") if rc else None
@@ -2472,7 +2776,7 @@ async def whatsapp_webhook(payload: Dict[str, Any], request: Request, tenant: Op
                     for x in (key_id, msg_id):
                         if isinstance(x, str) and x.strip() and x.strip() not in ids:
                             ids.append(x.strip())
-                    if not ids or from_me is False:
+                    if not ids:
                         continue
                     dt_ev = _extract_evolution_datetime(ev) or datetime.utcnow()
                     delivered = False
@@ -2501,12 +2805,12 @@ async def whatsapp_webhook(payload: Dict[str, Any], request: Request, tenant: Op
                         UPDATE "{DB_SCHEMA}"."Disparos"
                         SET "EntregueEm" = CASE
                               WHEN %s IS NULL THEN "EntregueEm"
-                              WHEN "EntregueEm" IS NULL OR "EntregueEm" < %s THEN %s
+                              WHEN "EntregueEm" IS NULL OR "EntregueEm" < GREATEST(%s, COALESCE("DataHora", %s)) THEN GREATEST(%s, COALESCE("DataHora", %s))
                               ELSE "EntregueEm"
                             END,
                             "VisualizadoEm" = CASE
                               WHEN %s IS NULL THEN "VisualizadoEm"
-                              WHEN "VisualizadoEm" IS NULL OR "VisualizadoEm" < %s THEN %s
+                              WHEN "VisualizadoEm" IS NULL OR "VisualizadoEm" < GREATEST(%s, COALESCE("DataHora", %s), COALESCE("EntregueEm", "DataHora", %s)) THEN GREATEST(%s, COALESCE("DataHora", %s), COALESCE("EntregueEm", "DataHora", %s))
                               ELSE "VisualizadoEm"
                             END,
                             "Status" = CASE
@@ -2520,19 +2824,34 @@ async def whatsapp_webhook(payload: Dict[str, Any], request: Request, tenant: Op
                           AND "Direcao" = 'OUT'
                           AND (
                             "MessageId" = ANY(%s)
-                            OR COALESCE(
-                              NULLIF("Payload"->>'keyId',''),
-                              NULLIF("Payload"->'key'->>'id',''),
-                              NULLIF("Payload"->'data'->>'keyId',''),
-                              NULLIF("Payload"->'data'->'key'->>'id',''),
-                              NULLIF("Payload"->>'messageId',''),
-                              NULLIF("Payload"->'data'->>'messageId',''),
-                              NULLIF("Payload"->>'id',''),
-                              NULLIF("Payload"->'data'->>'id','')
-                            ) = ANY(%s)
+                            OR NULLIF("Payload"->>'keyId','') = ANY(%s)
+                            OR NULLIF("Payload"->'key'->>'id','') = ANY(%s)
+                            OR NULLIF("Payload"->'data'->>'keyId','') = ANY(%s)
+                            OR NULLIF("Payload"->'data'->'key'->>'id','') = ANY(%s)
+                            OR NULLIF("Payload"->>'messageId','') = ANY(%s)
+                            OR NULLIF("Payload"->'data'->>'messageId','') = ANY(%s)
+                            OR NULLIF("Payload"->>'id','') = ANY(%s)
+                            OR NULLIF("Payload"->'data'->>'id','') = ANY(%s)
                           )
                         """,
-                        (delivered_dt, delivered_dt, delivered_dt, seen_dt, seen_dt, seen_dt, next_status, next_status, tid, ids, ids),
+                        (
+                            delivered_dt,
+                            delivered_dt, delivered_dt, delivered_dt, delivered_dt,
+                            seen_dt,
+                            seen_dt, seen_dt, seen_dt, seen_dt, seen_dt, seen_dt,
+                            next_status,
+                            next_status,
+                            tid,
+                            ids,
+                            ids,
+                            ids,
+                            ids,
+                            ids,
+                            ids,
+                            ids,
+                            ids,
+                            ids,
+                        ),
                     )
                     if cursor.rowcount:
                         receipts_updated += int(cursor.rowcount or 0)
@@ -2768,6 +3087,10 @@ async def whatsapp_webhook(payload: Dict[str, Any], request: Request, tenant: Op
             pass
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/webhook")
+async def whatsapp_webhook_compat(payload: Dict[str, Any], request: Request, tenant: Optional[str] = None):
+    return await whatsapp_webhook(payload, request, tenant=tenant)
+
 class RelatorioComprovanteRequest(BaseModel):
     campanha_id: int
     titulo: Optional[str] = None
@@ -2798,7 +3121,20 @@ async def disparos_list(limit: int = 1000, campanha_id: Optional[int] = None, nu
                        "IdCampanha" as campanha_id,
                        "Mensagem" as mensagem,
                        "Imagem" as imagem,
-                       "RespostaClassificacao" as resposta
+                       "RespostaClassificacao" as resposta,
+                       "EntregueEm" as entregue_em,
+                       "VisualizadoEm" as visualizado_em,
+                       COALESCE(
+                         NULLIF("Payload"->>'keyId',''),
+                         NULLIF("Payload"->'key'->>'id',''),
+                         NULLIF("Payload"->'data'->>'keyId',''),
+                         NULLIF("Payload"->'data'->'key'->>'id',''),
+                         NULLIF("MessageId",''),
+                         NULLIF("Payload"->>'messageId',''),
+                         NULLIF("Payload"->'data'->>'messageId',''),
+                         NULLIF("Payload"->>'id',''),
+                         NULLIF("Payload"->'data'->>'id','')
+                       ) as message_id
                 FROM "{DB_SCHEMA}"."Disparos"
                 WHERE {' AND '.join(where)}
                 ORDER BY "IdDisparo" DESC
@@ -2808,13 +3144,74 @@ async def disparos_list(limit: int = 1000, campanha_id: Optional[int] = None, nu
             )
             rows = cursor.fetchall()
             cols = [d[0] for d in cursor.description]
+            try:
+                msg_ids_needed: List[str] = []
+                for r in rows or []:
+                    d0 = dict(zip(cols, r))
+                    if str(d0.get('canal') or '').upper() != 'WHATSAPP':
+                        continue
+                    if str(d0.get('direcao') or '').upper() != 'OUT':
+                        continue
+                    if d0.get('entregue_em') is not None and d0.get('visualizado_em') is not None:
+                        continue
+                    mid = str(d0.get('message_id') or '').strip()
+                    if not mid:
+                        continue
+                    msg_ids_needed.append(mid)
+                if msg_ids_needed:
+                    delivered_ts, read_ts = _load_messageupdate_receipts(cursor, msg_ids=list(sorted(set(msg_ids_needed))))
+                    _apply_receipts_to_disparos(cursor, tid=int(tid), delivered_ts=delivered_ts, read_ts=read_ts, campanha_id=(int(campanha_id) if campanha_id is not None else None))
+                    conn.commit()
+                    cursor.execute(
+                        f"""
+                        SELECT "IdDisparo" as id,
+                               "Canal" as canal,
+                               "Numero" as destino,
+                               "Nome" as nome,
+                               "Direcao" as direcao,
+                               "Status" as status,
+                               "DataHora" as datahora,
+                               "IdCampanha" as campanha_id,
+                               "Mensagem" as mensagem,
+                               "Imagem" as imagem,
+                               "RespostaClassificacao" as resposta,
+                               "EntregueEm" as entregue_em,
+                               "VisualizadoEm" as visualizado_em,
+                               COALESCE(
+                                 NULLIF("Payload"->>'keyId',''),
+                                 NULLIF("Payload"->'key'->>'id',''),
+                                 NULLIF("Payload"->'data'->>'keyId',''),
+                                 NULLIF("Payload"->'data'->'key'->>'id',''),
+                                 NULLIF("MessageId",''),
+                                 NULLIF("Payload"->>'messageId',''),
+                                 NULLIF("Payload"->'data'->>'messageId',''),
+                                 NULLIF("Payload"->>'id',''),
+                                 NULLIF("Payload"->'data'->>'id','')
+                               ) as message_id
+                        FROM "{DB_SCHEMA}"."Disparos"
+                        WHERE {' AND '.join(where)}
+                        ORDER BY "IdDisparo" DESC
+                        LIMIT %s
+                        """,
+                        tuple(values + [int(limit)]),
+                    )
+                    rows = cursor.fetchall()
+                    cols = [d[0] for d in cursor.description]
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             out_rows: List[Dict[str, Any]] = []
             for r in rows or []:
                 d = dict(zip(cols, r))
                 for k, v in list(d.items()):
                     d[k] = _attach_utc(v)
+                if 'message_id' in d:
+                    d.pop('message_id', None)
                 out_rows.append(d)
-            return {"rows": out_rows, "columns": cols}
+            out_cols = [c for c in cols if c != 'message_id']
+            return {"rows": out_rows, "columns": out_cols}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -3075,6 +3472,8 @@ async def campanhas_schema():
                 {"name": "status", "type": "boolean", "nullable": True},
                 {"name": "meta", "type": "integer", "nullable": True},
                 {"name": "enviados", "type": "integer", "nullable": True},
+                {"name": "entregues", "type": "integer", "nullable": True},
+                {"name": "visualizados", "type": "integer", "nullable": True},
                 {"name": "nao_enviados", "type": "integer", "nullable": True},
                 {"name": "positivos", "type": "integer", "nullable": True},
                 {"name": "negativos", "type": "integer", "nullable": True},
@@ -3111,25 +3510,50 @@ async def campanhas_list(limit: int = 1000, request: Request = None):
 
             cursor.execute(
                 f"""
-                SELECT "IdCampanha" as id, "NomeCampanha" as nome, "Texto" as descricao, 
-                       "DataInicio" as data_inicio, "DataFim" as data_fim, "Status" as status, 
-                       "Meta" as meta, "Enviados" as enviados, "NaoEnviados" as nao_enviados, 
-                       "Positivos" as positivos, "Negativos" as negativos, "Aguardando" as aguardando,
-                       "RecorrenciaAtiva" as recorrencia_ativa,
-                       "TotalBlocos" as total_blocos,
-                       "MensagensPorBloco" as mensagens_por_bloco,
-                       "BlocosPorDia" as blocos_por_dia,
-                       "IntervaloMinSeg" as intervalo_min_seg,
-                       "IntervaloMaxSeg" as intervalo_max_seg,
-                       "BlocoAtual" as bloco_atual,
-                       "ProximaExecucao" as proxima_execucao,
-                       "Cadastrante" as cadastrante, "DataCriacao" as created_at, "Atualizacao" as updated_at, 
-                       "AnexoJSON" as conteudo_arquivo, "Imagem" as imagem
-                FROM "{DB_SCHEMA}"."Campanhas" 
-                WHERE "IdTenant" = %s
-                ORDER BY "IdCampanha" DESC LIMIT %s
+                WITH disp_stats AS (
+                  SELECT "IdCampanha" as campanha_id,
+                         COUNT(*) FILTER (WHERE "EntregueEm" IS NOT NULL) as entregues,
+                         COUNT(*) FILTER (WHERE "VisualizadoEm" IS NOT NULL) as visualizados
+                  FROM "{DB_SCHEMA}"."Disparos"
+                  WHERE "IdTenant" = %s
+                    AND COALESCE(NULLIF("Direcao", ''), 'OUT') = 'OUT'
+                    AND COALESCE(NULLIF("Canal", ''), 'WHATSAPP') = 'WHATSAPP'
+                  GROUP BY "IdCampanha"
+                )
+                SELECT c."IdCampanha" as id,
+                       c."NomeCampanha" as nome,
+                       c."Texto" as descricao, 
+                       c."DataInicio" as data_inicio,
+                       c."DataFim" as data_fim,
+                       c."Status" as status, 
+                       c."Meta" as meta,
+                       c."Enviados" as enviados,
+                       COALESCE(ds.entregues, 0) as entregues,
+                       COALESCE(ds.visualizados, 0) as visualizados,
+                       c."NaoEnviados" as nao_enviados, 
+                       c."Positivos" as positivos,
+                       c."Negativos" as negativos,
+                       c."Aguardando" as aguardando,
+                       c."RecorrenciaAtiva" as recorrencia_ativa,
+                       c."TotalBlocos" as total_blocos,
+                       c."MensagensPorBloco" as mensagens_por_bloco,
+                       c."BlocosPorDia" as blocos_por_dia,
+                       c."IntervaloMinSeg" as intervalo_min_seg,
+                       c."IntervaloMaxSeg" as intervalo_max_seg,
+                       c."BlocoAtual" as bloco_atual,
+                       c."ProximaExecucao" as proxima_execucao,
+                       c."Cadastrante" as cadastrante,
+                       c."DataCriacao" as created_at,
+                       c."Atualizacao" as updated_at, 
+                       c."AnexoJSON" as conteudo_arquivo,
+                       c."Imagem" as imagem
+                FROM "{DB_SCHEMA}"."Campanhas" c
+                LEFT JOIN disp_stats ds ON ds.campanha_id = c."IdCampanha"
+                WHERE c."IdTenant" = %s
+                ORDER BY c."IdCampanha" DESC
+                LIMIT %s
                 """,
-                (tid, limit)
+                (tid, tid, limit)
             )
             colnames = [desc[0] for desc in cursor.description]
             rows = cursor.fetchall()

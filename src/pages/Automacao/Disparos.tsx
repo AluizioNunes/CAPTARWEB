@@ -84,6 +84,22 @@ export default function Disparos() {
         render: (v: any) => v ? new Date(v).toLocaleString('pt-BR', { hour12: false }) : '—',
         sorter: (a: any, b: any) => new Date(a.visualizado_em || 0).getTime() - new Date(b.visualizado_em || 0).getTime(),
       },
+      {
+        title: 'STATUS DA MENSAGEM',
+        dataIndex: '__status_mensagem__',
+        align: 'center',
+        render: (_: any, record: any) => {
+          const recebido = !!record?.entregue_em
+          const visualizado = !!record?.visualizado_em
+          if (!recebido) return <Tag color="red">NÃO RECEBIDO</Tag>
+          return (
+            <Space size={6} wrap>
+              <Tag color="green">RECEBIDO</Tag>
+              {visualizado ? <Tag color="blue">VISUALIZADO</Tag> : <Tag>AGUARDANDO VISUALIZAÇÃO</Tag>}
+            </Space>
+          )
+        },
+      },
     ]
 
     if (!aguardarRespostas) return base

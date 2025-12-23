@@ -19,6 +19,22 @@ function Get-ApiUrlFromEnv($path) {
   return $null
 }
 
+function Get-FastApiPortFromEnv($path) {
+  try {
+    if (Test-Path $path) {
+      $line = Get-Content -Path $path | Where-Object { $_ -match '^FASTAPI_HOST_PORT=' } | Select-Object -First 1
+      if ($line) {
+        $val = $line -replace '^FASTAPI_HOST_PORT=', ''
+        $port = 0
+        if ([int]::TryParse($val.Trim(), [ref]$port) -and $port -gt 0) {
+          return $port
+        }
+      }
+    }
+  } catch {}
+  return $null
+}
+
 function Invoke-Json($url, $headers) {
   try {
     $resp = Invoke-WebRequest -Uri $url -Headers $headers -UseBasicParsing -TimeoutSec 10
@@ -71,7 +87,11 @@ function Test-Endpoint($name, $url, $headers, [string[]]$expectedKeys) {
 }
 
 $apiUrl = Get-ApiUrlFromEnv $EnvFilePath
-if (-not $apiUrl) { $apiUrl = $DefaultApiUrl }
+if (-not $apiUrl -or -not ($apiUrl -match '^https?://')) {
+  $port = Get-FastApiPortFromEnv $EnvFilePath
+  if (-not $port) { $port = 8000 }
+  $apiUrl = "http://localhost:$port/api"
+}
 $apiBase = $apiUrl.TrimEnd('/')
 $hostBase = ($apiBase -replace '/api$', '')
 $headers = @{ 'X-Tenant' = 'captar' }

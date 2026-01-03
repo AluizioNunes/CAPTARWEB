@@ -1064,6 +1064,313 @@ class ApiService {
     return response.data
   }
 
+  async getTwilioConfig(): Promise<{
+    account_sid?: string
+    enabled_channels?: string[]
+    has_auth_token?: boolean
+    auth_token_masked?: string
+    api_key_sid?: string
+    has_api_key_secret?: boolean
+    api_key_secret_masked?: string
+    messaging_service_sid?: string
+    whatsapp_from?: string
+    sms_from?: string
+    status_callback_url?: string
+    inbound_webhook_url?: string
+    validate_signature?: boolean
+    enabled?: boolean
+  }> {
+    const response = await this.api.get('/integracoes/twilio/config')
+    return response.data
+  }
+
+  async saveTwilioConfig(payload: {
+    account_sid: string
+    auth_token?: string
+    api_key_sid?: string
+    api_key_secret?: string
+    messaging_service_sid?: string
+    whatsapp_from?: string
+    sms_from?: string
+    enabled_channels?: string[]
+    status_callback_url?: string
+    inbound_webhook_url?: string
+    validate_signature?: boolean
+    enabled?: boolean
+  }): Promise<{ id: number; saved: boolean }> {
+    const response = await this.api.post('/integracoes/twilio/config', payload)
+    return response.data
+  }
+
+  async testTwilio(): Promise<{ ok: boolean; status_code: number; account?: any }> {
+    const response = await this.api.get('/integracoes/twilio/test')
+    return response.data
+  }
+
+  async sendTwilio(payload: {
+    to: string
+    channel?: string
+    body?: string
+    media_urls?: string[]
+    status_callback_url?: string
+    from_override?: string
+    campanha_id?: number
+    contato_nome?: string
+    content_sid?: string
+    content_variables?: Record<string, any> | string
+  }): Promise<{ ok: boolean; sid?: string; status?: string }> {
+    const response = await this.api.post('/integracoes/twilio/send', payload)
+    return response.data
+  }
+
+  async uploadTwilioMedia(file: File): Promise<{ ok: boolean; url: string; path?: string }> {
+    const fd = new FormData()
+    fd.append('file', file)
+    const response = await this.api.post('/integracoes/twilio/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+    return response.data
+  }
+
+  async getMetaWhatsAppConfig(config_id?: number): Promise<{
+    tenant_slug?: string
+    id?: number
+    perfil?: string
+    base_url?: string
+    api_version?: string
+    phone_number_id?: string
+    whatsapp_phone?: string
+    business_account_id?: string
+    app_id?: string
+    configuration_id?: string
+    partner_solution_id?: string
+    redirect_uri?: string
+    has_access_token?: boolean
+    access_token_masked?: string
+    has_webhook_verify_token?: boolean
+    webhook_verify_token_masked?: string
+    has_app_secret?: boolean
+    app_secret_masked?: string
+    validate_signature?: boolean
+    enabled?: boolean
+  }> {
+    const response = await this.api.get('/integracoes/meta/config', { params: config_id ? { config_id } : {} })
+    return response.data
+  }
+
+  async listMetaWhatsAppConfigs(): Promise<{ ok: boolean; rows: any[] }> {
+    const response = await this.api.get('/integracoes/meta/configs')
+    return response.data
+  }
+
+  async saveMetaWhatsAppConfig(payload: {
+    perfil?: string
+    base_url?: string
+    api_version?: string
+    access_token?: string
+    phone_number_id?: string
+    whatsapp_phone?: string
+    business_account_id?: string
+    webhook_verify_token?: string
+    app_secret?: string
+    app_id?: string
+    configuration_id?: string
+    partner_solution_id?: string
+    redirect_uri?: string
+    validate_signature?: boolean
+    enabled?: boolean
+  }, config_id?: number): Promise<{ id: number; saved: boolean }> {
+    const response = await this.api.post('/integracoes/meta/config', payload, { params: config_id ? { config_id } : {} })
+    return response.data
+  }
+
+  async deleteMetaWhatsAppConfig(config_id: number): Promise<{ ok: boolean; deleted?: number }> {
+    const response = await this.api.delete('/integracoes/meta/config', { params: { config_id } })
+    return response.data
+  }
+
+  async resolveMetaWhatsAppPhone(payload: { waba_id?: string; whatsapp_phone?: string; phone_number_id?: string; access_token?: string; base_url?: string; api_version?: string }, config_id?: number): Promise<{ ok: boolean; phone_number_id?: string; whatsapp_phone?: string }> {
+    const response = await this.api.post('/integracoes/meta/phone/resolve', payload, { params: config_id ? { config_id } : {} })
+    return response.data
+  }
+
+  async testMetaWhatsApp(config_id?: number): Promise<{ ok: boolean; status_code: number; phone_number?: any }> {
+    const response = await this.api.get('/integracoes/meta/test', { params: config_id ? { config_id } : {} })
+    return response.data
+  }
+
+  async uploadMetaWhatsAppMedia(file: File, config_id?: number): Promise<{ ok: boolean; id: string }> {
+    const fd = new FormData()
+    fd.append('file', file)
+    const response = await this.api.post('/integracoes/meta/upload', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      params: config_id ? { config_id } : {},
+    })
+    return response.data
+  }
+
+  async sendMetaWhatsApp(payload: {
+    to: string
+    body?: string
+    media_id?: string
+    media_url?: string
+    media_type?: string
+    text_position?: 'top' | 'bottom'
+    template_name?: string
+    template_lang?: string
+    template_components?: any[]
+    campanha_id?: number
+    contato_nome?: string
+  }, config_id?: number): Promise<{ ok: boolean; results?: any[]; message_ids?: string[]; message_id?: string }> {
+    const response = await this.api.post('/integracoes/meta/send', payload, { params: config_id ? { config_id } : {} })
+    return response.data
+  }
+
+  async createMetaTemplate(payload: {
+    template_name: string
+    language?: string
+    category?: string
+    body_text: string
+  }, config_id?: number): Promise<{ ok: boolean; response?: any }> {
+    const response = await this.api.post('/integracoes/meta/templates/create', payload, { params: config_id ? { config_id } : {} })
+    return response.data
+  }
+
+  async listMetaTemplates(payload?: { waba_id?: string; name?: string; status?: string; limit?: number }, config_id?: number): Promise<{ ok: boolean; response?: any }> {
+    const response = await this.api.get('/integracoes/meta/templates/list', { params: { ...(payload || {}), ...(config_id ? { config_id } : {}) } })
+    return response.data
+  }
+
+  async exchangeMetaEmbeddedSignup(payload: {
+    code: string
+    redirect_uri?: string
+    app_id?: string
+    configuration_id?: string
+    partner_solution_id?: string
+    waba_id?: string
+    phone_number_id?: string
+    business_id?: string
+  }, config_id?: number): Promise<any> {
+    const response = await this.api.post('/integracoes/meta/embedded-signup/exchange', payload, { params: config_id ? { config_id } : {} })
+    return response.data
+  }
+
+  async getMetaWhatsAppStats(days?: number): Promise<{ ok: boolean; days?: number; rows?: any[] }> {
+    const response = await this.api.get('/integracoes/meta/stats', { params: { days } })
+    return response.data
+  }
+
+  async setMetaWebhookOverrideWaba(payload: { waba_id?: string; override_callback_uri?: string; verify_token?: string }, config_id?: number): Promise<{ ok: boolean; mode?: string; response?: any }> {
+    const response = await this.api.post('/integracoes/meta/webhook/override/waba', payload, { params: config_id ? { config_id } : {} })
+    return response.data
+  }
+
+  async getMetaWebhookSubscribedApps(payload?: { waba_id?: string }, config_id?: number): Promise<{ ok: boolean; response?: any }> {
+    const response = await this.api.get('/integracoes/meta/webhook/subscribed_apps', { params: { ...(payload || {}), ...(config_id ? { config_id } : {}) } })
+    return response.data
+  }
+
+  async setMetaWebhookOverridePhone(payload: { phone_number_id?: string; override_callback_uri?: string; verify_token?: string }, config_id?: number): Promise<{ ok: boolean; response?: any }> {
+    const response = await this.api.post('/integracoes/meta/webhook/override/phone', payload, { params: config_id ? { config_id } : {} })
+    return response.data
+  }
+
+  async getMetaWebhookOverrideStatus(payload?: { phone_number_id?: string }, config_id?: number): Promise<{ ok: boolean; response?: any }> {
+    const response = await this.api.get('/integracoes/meta/webhook/override/status', { params: { ...(payload || {}), ...(config_id ? { config_id } : {}) } })
+    return response.data
+  }
+
+  async upsertTwilioOptIn(payload: { numbers: string[]; opted_in?: boolean; source?: string }): Promise<{ ok: boolean; updated: number; status: string; numbers: string[] }> {
+    const response = await this.api.post('/integracoes/twilio/optin', payload)
+    return response.data
+  }
+
+  async getTwilioOptInStatus(payload: { numbers: string[] }): Promise<{ items: { number: string; status: string; opted_in: boolean }[] }> {
+    const response = await this.api.post('/integracoes/twilio/optin/status', payload)
+    return response.data
+  }
+
+  async listTwilioMessagingServices(): Promise<{ services: { sid?: string | null; friendly_name?: string | null; inbound_request_url?: string | null; status_callback?: string | null }[] }> {
+    const response = await this.api.get('/integracoes/twilio/messaging-services')
+    return response.data
+  }
+
+  async getYCloudConfig(): Promise<{
+    base_url?: string
+    phone_number_id?: string
+    business_account_id?: string
+    has_api_key?: boolean
+    api_key_masked?: string
+    has_webhook_verify_token?: boolean
+    webhook_verify_token_masked?: string
+    enabled?: boolean
+  }> {
+    const response = await this.api.get('/integracoes/ycloud/config')
+    return response.data
+  }
+
+  async saveYCloudConfig(payload: {
+    base_url?: string
+    api_key?: string
+    phone_number_id?: string
+    business_account_id?: string
+    webhook_verify_token?: string
+    enabled?: boolean
+  }): Promise<{ id: number; saved: boolean }> {
+    const response = await this.api.post('/integracoes/ycloud/config', payload)
+    return response.data
+  }
+
+  async getDialog360Config(): Promise<{
+    base_url?: string
+    phone_number_id?: string
+    business_account_id?: string
+    has_api_key?: boolean
+    api_key_masked?: string
+    has_webhook_verify_token?: boolean
+    webhook_verify_token_masked?: string
+    enabled?: boolean
+  }> {
+    const response = await this.api.get('/integracoes/dialog360/config')
+    return response.data
+  }
+
+  async saveDialog360Config(payload: {
+    base_url?: string
+    api_key?: string
+    phone_number_id?: string
+    business_account_id?: string
+    webhook_verify_token?: string
+    enabled?: boolean
+  }): Promise<{ id: number; saved: boolean }> {
+    const response = await this.api.post('/integracoes/dialog360/config', payload)
+    return response.data
+  }
+
+  async getWANotifierConfig(): Promise<{
+    base_url?: string
+    phone_number_id?: string
+    business_account_id?: string
+    has_api_key?: boolean
+    api_key_masked?: string
+    has_webhook_verify_token?: boolean
+    webhook_verify_token_masked?: string
+    enabled?: boolean
+  }> {
+    const response = await this.api.get('/integracoes/wanotifier/config')
+    return response.data
+  }
+
+  async saveWANotifierConfig(payload: {
+    base_url?: string
+    api_key?: string
+    phone_number_id?: string
+    business_account_id?: string
+    webhook_verify_token?: string
+    enabled?: boolean
+  }): Promise<{ id: number; saved: boolean }> {
+    const response = await this.api.post('/integracoes/wanotifier/config', payload)
+    return response.data
+  }
+
   // ==================== CONFIGURAÇÕES & INTEGRAÇÕES ====================
 
   async listEvolutionApis(): Promise<any[]> {

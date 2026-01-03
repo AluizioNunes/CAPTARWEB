@@ -1,6 +1,6 @@
 param(
   [string]$EnvFilePath = ".env",
-  [string]$DevUrl = "http://localhost:5175",
+  [string]$DevUrl = "http://localhost:5173",
   [string]$DefaultApiUrl = "http://localhost:8000/api",
   [switch]$IncludeDev = $false,
   [switch]$TenantChecks = $false
@@ -35,6 +35,32 @@ function Get-FastApiPortFromEnv($path) {
   return $null
 }
 
+function Get-DevPortFromEnv($path) {
+  try {
+    if (Test-Path $path) {
+      $line = Get-Content -Path $path | Where-Object { $_ -match '^VITE_DEV_PORT=' } | Select-Object -First 1
+      if (-not $line) { $line = Get-Content -Path $path | Where-Object { $_ -match '^FRONTEND_HOST_PORT=' } | Select-Object -First 1 }
+      if ($line) {
+        $val = $line -replace '^(VITE_DEV_PORT|FRONTEND_HOST_PORT)=', ''
+        $port = 0
+        if ([int]::TryParse($val.Trim(), [ref]$port) -and $port -gt 0) {
+          return $port
+        }
+      }
+    }
+  } catch {}
+  return 5173
+}
+
+function Get-PortFromUrl($url) {
+  try {
+    if (-not $url) { return $null }
+    $u = [System.Uri]::new($url)
+    if ($u.Port -gt 0) { return [int]$u.Port }
+  } catch {}
+  return $null
+}
+
 function Invoke-Json($url, $headers) {
   try {
     $resp = Invoke-WebRequest -Uri $url -Headers $headers -UseBasicParsing -TimeoutSec 10
@@ -43,7 +69,21 @@ function Invoke-Json($url, $headers) {
     try { $json = $resp.Content | ConvertFrom-Json } catch {}
     return @{ ok = ($status -eq 200); status = $status; json = $json; raw = $resp.Content }
   } catch {
-    return @{ ok = $false; status = -1; error = $_.Exception.Message }
+    $status = -1
+    $raw = $null
+    try {
+      $resp = $_.Exception.Response
+      if ($resp -and $resp.StatusCode) { $status = [int]$resp.StatusCode }
+      try {
+        $stream = $resp.GetResponseStream()
+        if ($stream) {
+          $reader = New-Object System.IO.StreamReader($stream)
+          $raw = $reader.ReadToEnd()
+          $reader.Close()
+        }
+      } catch {}
+    } catch {}
+    return @{ ok = $false; status = $status; error = $_.Exception.Message; raw = $raw }
   }
 }
 
@@ -57,7 +97,23 @@ function Invoke-JsonPost($url, $headers, $bodyObj) {
     try { $json = $resp.Content | ConvertFrom-Json } catch {}
     return @{ ok = ($status -eq 200); status = $status; json = $json; raw = $resp.Content }
   } catch {
-    return @{ ok = $false; status = -1; error = $_.Exception.Message }
+    $status = -1
+    $raw = $null
+    try {
+      $resp = $_.Exception.Response
+      if ($resp -and $resp.StatusCode) { $status = [int]$resp.StatusCode }
+      try {
+        $stream = $resp.GetResponseStream()
+        if ($stream) {
+          $reader = New-Object System.IO.StreamReader($stream)
+          $raw = $reader.ReadToEnd()
+          $reader.Close()
+        }
+      } catch {}
+    } catch {}
+    $json = $null
+    try { if ($raw) { $json = $raw | ConvertFrom-Json } } catch {}
+    return @{ ok = $false; status = $status; error = $_.Exception.Message; raw = $raw; json = $json }
   }
 }
 
@@ -69,7 +125,23 @@ function Invoke-JsonDelete($url, $headers) {
     try { $json = $resp.Content | ConvertFrom-Json } catch {}
     return @{ ok = ($status -eq 200); status = $status; json = $json; raw = $resp.Content }
   } catch {
-    return @{ ok = $false; status = -1; error = $_.Exception.Message }
+    $status = -1
+    $raw = $null
+    try {
+      $resp = $_.Exception.Response
+      if ($resp -and $resp.StatusCode) { $status = [int]$resp.StatusCode }
+      try {
+        $stream = $resp.GetResponseStream()
+        if ($stream) {
+          $reader = New-Object System.IO.StreamReader($stream)
+          $raw = $reader.ReadToEnd()
+          $reader.Close()
+        }
+      } catch {}
+    } catch {}
+    $json = $null
+    try { if ($raw) { $json = $raw | ConvertFrom-Json } } catch {}
+    return @{ ok = $false; status = $status; error = $_.Exception.Message; raw = $raw; json = $json }
   }
 }
 
@@ -103,10 +175,65 @@ $results += Test-Endpoint 'dashboard' ("$apiBase/dashboard/stats") $headers @('t
 $results += Test-Endpoint 'usuarios' ("$apiBase/usuarios") $headers @('rows','columns')
 
 if ($IncludeDev) {
-  $devApiBase = ("$DevUrl/api").TrimEnd('/')
-  $results += Test-Endpoint 'dev.tenants' ("$devApiBase/tenants") $headers @('rows','columns')
-  $results += Test-Endpoint 'dev.dashboard' ("$devApiBase/dashboard/stats") $headers @('total_eleitores','total_usuarios')
-  $results += Test-Endpoint 'dev.usuarios' ("$devApiBase/usuarios") $headers @('rows','columns')
+  $devProc = $null
+  $devStarted = $false
+  $devPortFromEnv = Get-DevPortFromEnv $EnvFilePath
+  $devPortFromDevUrl = Get-PortFromUrl $DevUrl
+  $devPortsToTry = @()
+  if ($devPortFromDevUrl) { $devPortsToTry += $devPortFromDevUrl }
+  if ($devPortFromEnv) { $devPortsToTry += $devPortFromEnv }
+  $devPortsToTry += @(5173, 5174, 5175)
+  $devPortsToTry = $devPortsToTry | Select-Object -Unique
+
+  $devUrlsToTry = @()
+  if ($DevUrl) { $devUrlsToTry += $DevUrl }
+  $devUrlsToTry += ($devPortsToTry | ForEach-Object { "http://localhost:$_" }) | Where-Object { $_ -ne $DevUrl } | Select-Object -Unique
+
+  $pickedDevUrl = $null
+  foreach ($cand in $devUrlsToTry) {
+    $devApiBaseTry = ("$cand/api").TrimEnd('/')
+    $probe = Invoke-Json ("$devApiBaseTry/tenants") $headers
+    if ($probe.status -ne -1) { $pickedDevUrl = $cand; break }
+  }
+
+  if (-not $pickedDevUrl) {
+    foreach ($p in $devPortsToTry) {
+      try {
+        $devProc = Start-Process -FilePath "npm" -ArgumentList @("run","dev","--","--port",$p,"--host","0.0.0.0","--strictPort") -WorkingDirectory (Get-Location) -NoNewWindow -PassThru
+        $devStarted = $true
+      } catch {
+        $devProc = $null
+        $devStarted = $false
+      }
+
+      if (-not $devProc) { continue }
+
+      $timeoutAt = (Get-Date).AddSeconds(60)
+      while ((Get-Date) -lt $timeoutAt) {
+        if ($devProc.HasExited) { break }
+        $devApiBaseTry = ("http://localhost:$p/api").TrimEnd('/')
+        $probe = Invoke-Json ("$devApiBaseTry/tenants") $headers
+        if ($probe.status -ne -1) { $pickedDevUrl = "http://localhost:$p"; break }
+        Start-Sleep -Milliseconds 700
+      }
+
+      if ($pickedDevUrl) { break }
+      try { if (-not $devProc.HasExited) { Stop-Process -Id $devProc.Id -Force } } catch {}
+      $devProc = $null
+      $devStarted = $false
+    }
+  }
+
+  if ($pickedDevUrl) {
+    $devApiBase = ("$pickedDevUrl/api").TrimEnd('/')
+    $results += Test-Endpoint 'dev.tenants' ("$devApiBase/tenants") $headers @('rows','columns')
+    $results += Test-Endpoint 'dev.dashboard' ("$devApiBase/dashboard/stats") $headers @('total_eleitores','total_usuarios')
+    $results += Test-Endpoint 'dev.usuarios' ("$devApiBase/usuarios") $headers @('rows','columns')
+  } else {
+    $results += @{ name = 'dev.tenants'; url = "$DevUrl/api/tenants"; pass = $false; status = -1; keysOk = $false; json = $null; error = 'Dev server indisponível' }
+    $results += @{ name = 'dev.dashboard'; url = "$DevUrl/api/dashboard/stats"; pass = $false; status = -1; keysOk = $false; json = $null; error = 'Dev server indisponível' }
+    $results += @{ name = 'dev.usuarios'; url = "$DevUrl/api/usuarios"; pass = $false; status = -1; keysOk = $false; json = $null; error = 'Dev server indisponível' }
+  }
 }
 
 Write-Host "=== Smoke Test (API) ==="
@@ -118,11 +245,11 @@ foreach ($r in $results) {
 $failCount = ($results | Where-Object { -not $_.pass }).Count
 if ($failCount -gt 0) {
   Write-Host "Failures: $failCount" -ForegroundColor Red
-  if (-not $TenantChecks) { exit 1 }
 } else {
   Write-Host "All endpoints healthy" -ForegroundColor Green
 }
 
+$tenantFailCount = 0
 if ($TenantChecks) {
   Write-Host "`n=== Tenant Checks (Login + Create/Delete Usuario) ==="
   $ten = Invoke-Json ("$apiBase/tenants") $headers
@@ -133,12 +260,6 @@ if ($TenantChecks) {
     if (-not $slug) { continue }
     $slugUpper = $slug.ToUpper()
     $h = @{ 'X-Tenant' = $slug }
-    # Login test
-    $loginBody = @{ usuario = "ADMIN.$slugUpper"; senha = 'admin123' }
-    $login = Invoke-JsonPost ("$apiBase/auth/login") $h $loginBody
-    $okLogin = ($login.ok -and $login.json -and $login.json.token)
-    $markLogin = if ($okLogin) { '[OK] ' } else { '[FAIL] ' }
-    Write-Host ($markLogin + "login($slug) -> status=" + $login.status)
     # Create user test
     $tmpUser = @{ Nome = "SMOKE USER $slugUpper"; Email = "smoke.$slug@local"; Senha = '123456'; Usuario = "SMOKE.$slugUpper"; Perfil = 'COORDENADOR'; Funcao = 'COORDENADOR'; Ativo = $true }
     $cre = Invoke-JsonPost ("$apiBase/usuarios") $h $tmpUser
@@ -149,11 +270,28 @@ if ($TenantChecks) {
     $idText = if ($null -ne $id) { $id } else { 0 }
     Write-Host ($markCreate + "create($slug) -> status=" + $cre.status + " id=" + $idText)
     if ($okCreate) {
+      $loginBody = @{ usuario = "SMOKE.$slugUpper"; senha = '123456' }
+      $login = Invoke-JsonPost ("$apiBase/auth/login") $h $loginBody
+      $okLogin = ($login.ok -and $login.json -and $login.json.token)
+      $markLogin = if ($okLogin) { '[OK] ' } else { '[FAIL] ' }
+      Write-Host ($markLogin + "login($slug) -> status=" + $login.status)
+      if (-not $okLogin) { $tenantFailCount += 1 }
       $del = Invoke-JsonDelete ("$apiBase/usuarios/$id") $h
       $okDel = ($del.ok -and $del.json -and $del.json.deleted)
       $markDel = if ($okDel) { '[OK] ' } else { '[FAIL] ' }
       Write-Host ($markDel + "delete($slug) -> status=" + $del.status)
+      if (-not $okDel) { $tenantFailCount += 1 }
+    } else {
+      $tenantFailCount += 1
     }
   }
 }
+
+if ($IncludeDev -and $devProc -and $devStarted) {
+  try {
+    if (-not $devProc.HasExited) { Stop-Process -Id $devProc.Id -Force }
+  } catch {}
+}
+
+if (($failCount + $tenantFailCount) -gt 0) { exit 1 }
 

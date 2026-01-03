@@ -8,19 +8,22 @@ interface ChartComponentProps {
   yField: string
 }
 
+let captarThemeRegistered = false
+
 export default function ChartComponent({ data, type, xField, yField }: ChartComponentProps) {
   const chartRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!chartRef.current || !data || data.length === 0) return
 
-    if (!(echarts as any).themes || !(echarts as any).themes?.captarTheme) {
+    if (!captarThemeRegistered) {
       echarts.registerTheme('captarTheme', {
         color: ['#667eea', '#764ba2', '#ff7a59', '#2dd4bf', '#f59e0b'],
         textStyle: { fontFamily: 'Poppins, Montserrat, system-ui, -apple-system, Segoe UI, sans-serif' },
         tooltip: { backgroundColor: 'rgba(50,50,50,0.9)' },
         grid: { containLabel: true }
       })
+      captarThemeRegistered = true
     }
 
     const chart = echarts.init(chartRef.current, 'captarTheme')

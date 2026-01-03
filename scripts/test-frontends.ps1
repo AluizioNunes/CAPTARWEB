@@ -5,6 +5,19 @@ Write-Host "Teste de Acesso aos Frontends" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
+try {
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+} catch {
+}
+try {
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+} catch {
+}
+try {
+    Add-Type -AssemblyName System.Net.Http
+} catch {
+}
+
 $FRONTEND_PORT = $env:FRONTEND_HOST_PORT
 if (-not $FRONTEND_PORT) { $FRONTEND_PORT = "5501" }
 
@@ -14,7 +27,9 @@ if (-not $EV_API_PORT) { $EV_API_PORT = "4400" }
 $EV_FRONTEND_PORT = $env:EV_FRONTEND_HOST_PORT
 if (-not $EV_FRONTEND_PORT) { $EV_FRONTEND_PORT = "4401" }
 
-$NGINX_PORT = "5500"
+$NGINX_PORT = $env:NGINX_HOST_PORT
+if (-not $NGINX_PORT) { $NGINX_PORT = $env:NGINX_HTTP_PORT }
+if (-not $NGINX_PORT) { $NGINX_PORT = "80" }
 
 Write-Host "1. Verificando status dos containers..." -ForegroundColor Yellow
 Write-Host ""
@@ -57,13 +72,46 @@ function Test-Url {
     )
 
     Write-Host "   ${Name}: ${Url}" -ForegroundColor Gray
+    $handler = $null
+    $client = $null
+    $resp = $null
     try {
-        $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec 8 -UseBasicParsing -ErrorAction Stop
-        Write-Host "   OK: HTTP $($response.StatusCode)" -ForegroundColor Green
-        return $true
+        $handler = New-Object System.Net.Http.HttpClientHandler
+        try {
+            $handler.AllowAutoRedirect = $false
+        } catch {}
+        try {
+            $handler.ServerCertificateCustomValidationCallback = { param($sender, $cert, $chain, $errors) return $true }
+        } catch {}
+
+        $client = New-Object System.Net.Http.HttpClient($handler)
+        $client.Timeout = [TimeSpan]::FromSeconds(8)
+
+        $resp = $client.GetAsync($Url).GetAwaiter().GetResult()
+        $code = [int]$resp.StatusCode
+        $finalUrl = $null
+        try { $finalUrl = $resp.RequestMessage.RequestUri.AbsoluteUri } catch {}
+
+        if ($finalUrl -and $finalUrl -ne $Url) { Write-Host "   Final: $finalUrl" -ForegroundColor DarkGray }
+        if ($code -ge 300 -and $code -lt 400) {
+            $loc = $null
+            try { $loc = $resp.Headers.Location.AbsoluteUri } catch {}
+            if ($loc) { Write-Host "   Redirect: $loc" -ForegroundColor DarkGray }
+        }
+
+        if ($code -ge 200 -and $code -lt 400) {
+            Write-Host "   OK: HTTP $code" -ForegroundColor Green
+            return $true
+        }
+        Write-Host "   ERRO: HTTP $code" -ForegroundColor Red
+        return $false
     } catch {
         Write-Host "   ERRO: $($_.Exception.Message)" -ForegroundColor Red
         return $false
+    } finally {
+        try { if ($resp) { $resp.Dispose() } } catch {}
+        try { if ($client) { $client.Dispose() } } catch {}
+        try { if ($handler) { $handler.Dispose() } } catch {}
     }
 }
 
@@ -81,13 +129,7 @@ Write-Host ""
 Write-Host "3. Verificando endpoints..." -ForegroundColor Yellow
 Write-Host ""
 
-Write-Host "   FastAPI /api/health via Nginx: http://localhost:$NGINX_PORT/api/health" -ForegroundColor Gray
-try {
-    $fastApiHealth = Invoke-WebRequest -Uri "http://localhost:$NGINX_PORT/api/health" -Method Get -TimeoutSec 8 -UseBasicParsing -ErrorAction Stop
-    Write-Host "   OK: HTTP $($fastApiHealth.StatusCode)" -ForegroundColor Green
-} catch {
-    Write-Host "   ERRO: $($_.Exception.Message)" -ForegroundColor Red
-}
+Test-Url -Url "http://localhost:$NGINX_PORT/api/health" -Name "FastAPI /api/health via Nginx"
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan

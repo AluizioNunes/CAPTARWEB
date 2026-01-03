@@ -220,7 +220,7 @@ export default function Metas() {
         loading={loading}
         dataSource={data}
         columns={visibleColumns as any}
-        rowKey={(r) => r.IdMeta ?? r.id ?? JSON.stringify(r)}
+        rowKey={(r, idx) => String((r as any).IdMeta ?? (r as any).id ?? idx)}
         bordered
         size="small"
         className="ant-table-striped metas-table"

@@ -170,7 +170,7 @@ export default function Relatorios() {
         <Col span={24}>
           <Card>
             <Table
-              rowKey={(r) => r.id || JSON.stringify(r)}
+              rowKey={(r, idx) => String((r as any).id ?? idx)}
               loading={loading}
               dataSource={dados}
               columns={columns as any}

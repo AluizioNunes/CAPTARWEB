@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion'
 import { useEffect, useState } from 'react'
-import { Table, Button, Space, message, Dropdown, Checkbox, Tag } from 'antd'
+import { Table, Button, Space, Dropdown, Checkbox, Tag, App } from 'antd'
 import { useAuthStore } from '../store/authStore'
 import { useApi } from '../context/ApiContext'
 import UsuariosModal from '../components/UsuariosModal'
@@ -15,6 +15,7 @@ export default function Usuario() {
   const [orderedKeys, setOrderedKeys] = useState<string[]>([])
   const api = useApi()
   const { user } = useAuthStore()
+  const { message } = App.useApp()
 
   const IconEdit = () => (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25z" fill="currentColor"/><path d="M20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" fill="currentColor"/></svg>
@@ -265,7 +266,7 @@ export default function Usuario() {
         loading={loading}
         dataSource={data}
         columns={visibleColumns as any}
-        rowKey={(r) => r.IdUsuario ?? r.id ?? r.ID ?? r.id_usuario ?? JSON.stringify(r)}
+        rowKey={(r, idx) => String((r as any).IdUsuario ?? (r as any).id ?? (r as any).ID ?? (r as any).id_usuario ?? idx)}
         bordered
         size="small"
         className="ant-table-striped usuarios-table"

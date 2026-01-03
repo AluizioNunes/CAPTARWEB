@@ -241,7 +241,7 @@ export default function Disparos() {
               </Space>
             </Space>
             <Table
-              rowKey={(r) => String(r.numero || JSON.stringify(r))}
+              rowKey={(r, idx) => String((r as any).numero ?? idx)}
               loading={loading}
               dataSource={dados}
               columns={columns as any}

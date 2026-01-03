@@ -78,7 +78,7 @@ export default function Candidatos() {
           loading={loading}
           dataSource={rows}
           columns={colsDef as any}
-          rowKey={r => r.IdCandidato ?? JSON.stringify(r)}
+          rowKey={(r, idx) => String((r as any).IdCandidato ?? idx)}
           pagination={{ pageSize: 10 }}
           scroll={{ y: 480 }}
           locale={{ emptyText: 'Nenhum candidato' }}

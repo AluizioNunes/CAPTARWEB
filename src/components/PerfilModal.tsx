@@ -1,4 +1,4 @@
-import { Modal, Form, Input, Checkbox, Button, Space, message, InputNumber, DatePicker } from 'antd'
+import { Modal, Form, Input, Checkbox, Button, Space, InputNumber, DatePicker, App } from 'antd'
 import { useEffect, useState } from 'react'
 import { useApi } from '../context/ApiContext'
 
@@ -13,6 +13,7 @@ export default function PerfilModal({ open, initial, onCancel, onSaved }: Props)
   const [form] = Form.useForm()
   const [schema, setSchema] = useState<{ name: string; type: string; nullable: boolean }[]>([])
   const api = useApi()
+  const { message } = App.useApp()
 
   useEffect(() => {
     const loadSchema = async () => {

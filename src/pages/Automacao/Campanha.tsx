@@ -24,6 +24,7 @@ export default function Campanha() {
   const [contactStatuses, setContactStatuses] = useState<any[]>([])
   const [evolutionInstances, setEvolutionInstances] = useState<any[]>([])
   const [selectedEvolutionInstanceId, setSelectedEvolutionInstanceId] = useState<string | 'ALL' | null>(null)
+  const [twilioConfig, setTwilioConfig] = useState<any | null>(null)
 
   const api = useApi()
   const { user } = useAuthStore()
@@ -65,6 +66,14 @@ export default function Campanha() {
     } catch {}
     return {}
   }, [api, selectedCampanha?.id, selectedCampanha?.conteudo_arquivo])
+
+  const selectedProvider = useMemo(() => {
+    const cfg = selectedCampanhaConfig || {}
+    const providerRaw = String((cfg as any)?.provider || '').trim().toLowerCase()
+    if (providerRaw === 'twilio') return 'twilio'
+    if (providerRaw === 'meta') return 'meta'
+    return 'evolution'
+  }, [selectedCampanhaConfig])
 
   const eventLogsKey = useMemo(() => {
     if (!selectedCampanha?.id) return null
@@ -109,6 +118,17 @@ export default function Campanha() {
   useEffect(() => {
     loadEvolutionInstances()
   }, [loadEvolutionInstances])
+
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const cfg = await api.getTwilioConfig()
+        setTwilioConfig(cfg || null)
+      } catch {
+        setTwilioConfig(null)
+      }
+    })()
+  }, [api])
 
   const availableEvolutionInstances = useMemo(() => {
     const cfg = selectedCampanhaConfig || {}
@@ -451,8 +471,12 @@ export default function Campanha() {
       setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] INICIANDO DISPARO DA CAMPANHA: ${selectedCampanha.nome}`])
       
       try {
-          // Check connection first
-          setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] Verificando conexão com EvolutionAPI...`])
+          const config = (() => {
+              return selectedCampanhaConfig || {}
+          })()
+          const providerRaw = String((config as any)?.provider || '').trim().toLowerCase()
+          const provider: 'evolution' | 'twilio' | 'meta' = providerRaw === 'twilio' ? 'twilio' : (providerRaw === 'meta' ? 'meta' : 'evolution')
+          setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] Provedor selecionado: ${provider === 'twilio' ? 'Twilio' : (provider === 'meta' ? 'Meta Cloud API' : 'EvolutionAPI')}.`])
           
           // Filter targets: Waiting or Error (Retry)
           // Exclude Success
@@ -470,10 +494,10 @@ export default function Campanha() {
           // If it starts with data:, it's base64. If http, it's URL. Otherwise, assume it's a filename that backend will resolve.
           const mediaPayload = selectedCampanha.imagem ? resolveImageSrc(selectedCampanha.imagem) : undefined
           
-          const config = (() => {
-              return selectedCampanhaConfig || {}
-          })()
           const aguardarRespostas = String(config.response_mode || '').toUpperCase() === 'SIM_NAO'
+          const metaTemplateName = String((config as any).meta_template_name || '').trim()
+          const metaTemplateLang = String((config as any).meta_template_lang || '').trim() || 'pt_BR'
+          const metaTemplateParams = Array.isArray((config as any).meta_template_params) ? (config as any).meta_template_params : []
           const evoIds = (() => {
             const rawIds = (config as any).evolution_api_ids ?? (config as any).evolution_api_id
             const arr = Array.isArray(rawIds) ? rawIds : (rawIds !== undefined && rawIds !== null ? [rawIds] : [])
@@ -513,8 +537,95 @@ export default function Campanha() {
             return (connected.length ? connected : list).filter((x: any) => !!String(x?.id ?? '').trim())
           })()
 
-          try {
-              const digitsOnly = (v: any) => String(v ?? '').replace(/\D/g, '')
+          const digitsOnly = (v: any) => String(v ?? '').replace(/\D/g, '')
+          const applyContactTokens = (text: any, contact: any) => {
+            let out = String(text ?? '')
+            const nameToUse = String(contact?.nome || '')
+            const waRaw = String(contact?.whatsapp || '')
+            const waDigits = digitsOnly(waRaw)
+            const waToUse = waDigits || waRaw
+            out = out
+              .replace(/\(NOME\)/gi, nameToUse)
+              .replace(/\{NOME\}/gi, nameToUse)
+              .replace(/\(NAME\)/gi, nameToUse)
+              .replace(/\{NAME\}/gi, nameToUse)
+              .replace(/\(WHATSAPP\)/gi, waToUse)
+              .replace(/\{WHATSAPP\}/gi, waToUse)
+              .replace(/\(PHONE\)/gi, waToUse)
+              .replace(/\{PHONE\}/gi, waToUse)
+            return out
+          }
+          const pickExtByMime = (mime: string) => {
+            const m = String(mime || '').trim().toLowerCase()
+            if (!m) return '.bin'
+            if (m === 'image/jpeg' || m === 'image/jpg') return '.jpg'
+            if (m === 'image/png') return '.png'
+            if (m === 'image/webp') return '.webp'
+            if (m === 'image/gif') return '.gif'
+            if (m === 'application/pdf') return '.pdf'
+            if (m === 'audio/mpeg') return '.mp3'
+            if (m === 'audio/wav') return '.wav'
+            if (m === 'video/mp4') return '.mp4'
+            return '.bin'
+          }
+          const dataUrlToFile = (dataUrl: string, filename: string) => {
+            const m = String(dataUrl || '').match(/^data:([^;]+);base64,(.+)$/i)
+            if (!m) return null
+            const mime = m[1]
+            const b64 = m[2]
+            const atobFn = (globalThis as any)?.atob as ((s: string) => string) | undefined
+            if (!atobFn) return null
+            const binStr = atobFn(b64)
+            const len = binStr.length
+            const bytes = new Uint8Array(len)
+            for (let i = 0; i < len; i++) bytes[i] = binStr.charCodeAt(i)
+            const ext = pickExtByMime(mime)
+            const name = filename.toLowerCase().endsWith(ext) ? filename : `${filename}${ext}`
+            return new File([bytes], name, { type: mime })
+          }
+
+          let twilioMediaUrls: string[] | undefined = undefined
+          if (provider === 'twilio' && mediaPayload) {
+            try {
+              const s = String(mediaPayload || '').trim()
+              if (s.startsWith('data:')) {
+                const file = dataUrlToFile(s, `campanha_${String(selectedCampanha.id || '0')}`)
+                if (file) {
+                  setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] Enviando mídia da campanha para URL pública (Twilio)...`])
+                  const up = await api.uploadTwilioMedia(file)
+                  if (up?.url) twilioMediaUrls = [String(up.url)]
+                }
+              } else {
+                if (s) twilioMediaUrls = [s]
+              }
+            } catch {
+              twilioMediaUrls = undefined
+            }
+          }
+
+          let metaMediaId: string | undefined = undefined
+          let metaMediaUrl: string | undefined = undefined
+          if (provider === 'meta' && mediaPayload) {
+            try {
+              const s = String(mediaPayload || '').trim()
+              if (s.startsWith('data:')) {
+                const file = dataUrlToFile(s, `campanha_${String(selectedCampanha.id || '0')}`)
+                if (file) {
+                  setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] Enviando mídia da campanha para a Meta (upload)...`])
+                  const up = await api.uploadMetaWhatsAppMedia(file)
+                  if (up?.id) metaMediaId = String(up.id)
+                }
+              } else if (s) {
+                metaMediaUrl = s
+              }
+            } catch {
+              metaMediaId = undefined
+              metaMediaUrl = undefined
+            }
+          }
+
+          if (provider === 'evolution') {
+            try {
               const toValidate = Array.from(new Set(
                 localContacts
                   .filter(c => typeof (c as any).is_whatsapp !== 'boolean')
@@ -522,27 +633,28 @@ export default function Campanha() {
                   .filter(Boolean)
               ))
               if (toValidate.length) {
-                  setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] Validando números no WhatsApp (${toValidate.length})...`])
-                  const evoId =
-                    (typeof selectedEvolutionInstanceId === 'string' && selectedEvolutionInstanceId && selectedEvolutionInstanceId !== 'ALL')
-                      ? selectedEvolutionInstanceId
-                      : undefined
-                  const wa = await api.whatsappCheckNumbers({ numbers: toValidate, evolution_api_id: evoId })
-                  const waByNumber = new Map<string, { is_whatsapp: boolean; jid?: string | null }>()
-                  for (const r of wa?.rows || []) {
-                      const d = digitsOnly((r as any).number)
-                      if (!d) continue
-                      waByNumber.set(d, { is_whatsapp: !!(r as any).is_whatsapp, jid: (r as any).jid ?? null })
-                  }
-                  localContacts = localContacts.map((c: any) => {
-                      const d = digitsOnly(c.whatsapp)
-                      const hit = waByNumber.get(d)
-                      if (!hit) return c
-                      return { ...c, is_whatsapp: hit.is_whatsapp, whatsapp_jid: hit.jid ?? null, original: { ...(c.original || {}), is_whatsapp: hit.is_whatsapp, whatsapp_jid: hit.jid ?? null } }
-                  })
-                  setContactStatuses([...localContacts])
+                setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] Validando números no WhatsApp (${toValidate.length})...`])
+                const evoId =
+                  (typeof selectedEvolutionInstanceId === 'string' && selectedEvolutionInstanceId && selectedEvolutionInstanceId !== 'ALL')
+                    ? selectedEvolutionInstanceId
+                    : undefined
+                const wa = await api.whatsappCheckNumbers({ numbers: toValidate, evolution_api_id: evoId })
+                const waByNumber = new Map<string, { is_whatsapp: boolean; jid?: string | null }>()
+                for (const r of wa?.rows || []) {
+                  const d = digitsOnly((r as any).number)
+                  if (!d) continue
+                  waByNumber.set(d, { is_whatsapp: !!(r as any).is_whatsapp, jid: (r as any).jid ?? null })
+                }
+                localContacts = localContacts.map((c: any) => {
+                  const d = digitsOnly(c.whatsapp)
+                  const hit = waByNumber.get(d)
+                  if (!hit) return c
+                  return { ...c, is_whatsapp: hit.is_whatsapp, whatsapp_jid: hit.jid ?? null, original: { ...(c.original || {}), is_whatsapp: hit.is_whatsapp, whatsapp_jid: hit.jid ?? null } }
+                })
+                setContactStatuses([...localContacts])
               }
-          } catch {
+            } catch {
+            }
           }
 
           // We iterate over the FULL list to maintain indices, but skip success
@@ -562,7 +674,7 @@ export default function Campanha() {
               let success = false
               let errorMsg = ''
 
-              if (contact.is_whatsapp === false) {
+              if (provider === 'evolution' && contact.is_whatsapp === false) {
                   success = false
                   errorMsg = 'Número não possui WhatsApp'
               } else try {
@@ -579,6 +691,8 @@ export default function Campanha() {
                       setEventLogs(prev => [...prev, `[${dayjs().format('HH:mm:ss')}] DEBUG: Exemplo de mensagem resolvida: "${msg}"`])
                   }
 
+                  const usingMetaTemplate = provider === 'meta' && !!metaTemplateName
+
                   if (aguardarRespostas) {
                       const question = String(config.question || '').trim()
                       const parts = [msg.trim()]
@@ -587,26 +701,108 @@ export default function Campanha() {
                       msg = parts.filter(Boolean).join('\n\n')
                   }
                   let textPosition = config.text_position || 'bottom'
-                  if (!msg.trim()) {
-                      if (!mediaPayload) throw new Error('Mensagem vazia')
+                  if (!usingMetaTemplate && !msg.trim()) {
+                    if (!mediaPayload) throw new Error('Mensagem vazia')
                   }
 
-                  const chosenEvoId =
-                    selectedEvolutionInstanceId === 'ALL'
-                      ? (rrPool.length ? String(rrPool[attemptIndex % rrPool.length]?.id ?? '').trim() : undefined)
-                      : (typeof selectedEvolutionInstanceId === 'string' ? selectedEvolutionInstanceId : (evoIds.length ? evoIds[attemptIndex % evoIds.length] : undefined))
-                  await api.sendWhatsAppMessage(
-                      String(contact.whatsapp), 
-                      msg,
-                      mediaPayload,
-                      textPosition,
-                      { campanha_id: selectedCampanha.id, contato_nome: contact.nome, evolution_api_id: chosenEvoId ?? undefined }
-                  )
+                 if (provider === 'twilio') {
+                    const d = digitsOnly(contact.whatsapp)
+                    const to = d ? `whatsapp:+${d}` : String(contact.whatsapp || '').trim()
+                    const bodyToSend = msg.trim() ? msg : '.'
+                    await api.sendTwilio({
+                      to,
+                      body: bodyToSend,
+                      media_urls: twilioMediaUrls,
+                      campanha_id: Number(selectedCampanha.id),
+                      contato_nome: String(contact.nome || ''),
+                    })
+                  } else if (provider === 'meta') {
+                    const d = digitsOnly(contact.whatsapp)
+                    const to = d ? `+${d}` : String(contact.whatsapp || '').trim()
+                    if (usingMetaTemplate) {
+                      const comps: any[] = []
+                      if (metaMediaId) {
+                        comps.push({ type: 'header', parameters: [{ type: 'image', image: { id: metaMediaId } }] })
+                      } else if (metaMediaUrl) {
+                        comps.push({ type: 'header', parameters: [{ type: 'image', image: { link: metaMediaUrl } }] })
+                      }
+                      const params = (metaTemplateParams || []).map((p: any) => applyContactTokens(p, contact)).filter((x: any) => String(x ?? '').trim().length > 0)
+                      if (params.length) {
+                        comps.push({ type: 'body', parameters: params.map((t: string) => ({ type: 'text', text: t })) })
+                      }
+                      await api.sendMetaWhatsApp({
+                        to,
+                        template_name: metaTemplateName,
+                        template_lang: metaTemplateLang,
+                        template_components: comps.length ? comps : undefined,
+                        campanha_id: Number(selectedCampanha.id),
+                        contato_nome: String(contact.nome || ''),
+                      })
+                      if (aguardarRespostas && msg.trim()) {
+                        await api.sendMetaWhatsApp({
+                          to,
+                          body: msg,
+                          campanha_id: Number(selectedCampanha.id),
+                          contato_nome: String(contact.nome || ''),
+                        })
+                      }
+                    } else {
+                      await api.sendMetaWhatsApp({
+                        to,
+                        body: msg,
+                        media_id: metaMediaId,
+                        media_url: metaMediaUrl,
+                        media_type: metaMediaId || metaMediaUrl ? 'image' : undefined,
+                        text_position: textPosition,
+                        campanha_id: Number(selectedCampanha.id),
+                        contato_nome: String(contact.nome || ''),
+                      })
+                    }
+                  } else {
+                    const chosenEvoId =
+                      selectedEvolutionInstanceId === 'ALL'
+                        ? (rrPool.length ? String(rrPool[attemptIndex % rrPool.length]?.id ?? '').trim() : undefined)
+                        : (typeof selectedEvolutionInstanceId === 'string' ? selectedEvolutionInstanceId : (evoIds.length ? evoIds[attemptIndex % evoIds.length] : undefined))
+                    await api.sendWhatsAppMessage(
+                        String(contact.whatsapp),
+                        msg,
+                        mediaPayload,
+                        textPosition,
+                        { campanha_id: selectedCampanha.id, contato_nome: contact.nome, evolution_api_id: chosenEvoId ?? undefined }
+                    )
+                  }
                   success = true
               } catch (err: any) {
                   console.error(err)
                   success = false
-                  errorMsg = err.response?.data?.detail || err.message || 'Erro desconhecido'
+                  const status = err?.response?.status
+                  const data = err?.response?.data
+                  const detail = data?.detail ?? data?.message ?? data
+                  const safeStringify = (v: any) => {
+                    try {
+                      return JSON.stringify(v)
+                    } catch {
+                      return String(v ?? '')
+                    }
+                  }
+                  const detailText = (() => {
+                    if (typeof detail === 'string') {
+                      const s = detail.trim()
+                      if ((s.startsWith('{') && s.endsWith('}')) || (s.startsWith('[') && s.endsWith(']'))) {
+                        try {
+                          return safeStringify(JSON.parse(s))
+                        } catch {
+                          return s
+                        }
+                      }
+                      return s
+                    }
+                    return safeStringify(detail)
+                  })()
+                  const baseText = detailText || err?.message || 'Erro desconhecido'
+                  errorMsg = status ? `HTTP ${status}: ${baseText}` : baseText
+                  const toastText = errorMsg.length > 220 ? `${errorMsg.slice(0, 220)}...` : errorMsg
+                  message.error({ content: `Falha ao entregar para ${contact.whatsapp}: ${toastText}`, key: 'envio_status', duration: 6 })
               }
 
               const dispatchAtMs = Date.now()
@@ -1056,27 +1252,55 @@ export default function Campanha() {
                  </div>
                  
                  <div style={{ display: 'flex', gap: 8 }}>
-                     <Select
-                       value={selectedEvolutionInstanceId ?? undefined}
-                       placeholder="Instância Evolution"
-                       style={{ minWidth: 220 }}
-                       disabled={!selectedCampanha || !availableEvolutionInstances.length}
-                       options={[
-                         { value: 'ALL', label: 'TODAS AS INSTÂNCIAS (ALTERNAR)' },
-                         ...(availableEvolutionInstances || []).map((x: any) => {
-                           const status = String(x?.connectionStatus || '').toUpperCase()
-                           const nm = String(x?.name || x?.nome || x?.id)
-                           const num = String(x?.number || '').trim()
-                           const label = `${nm}${num ? ` - ${num}` : ''}${status ? ` (${status})` : ''}`
-                           return { value: String(x?.id ?? '').trim(), label }
-                         }),
-                       ]}
-                       onChange={(val) => {
-                         if (val === 'ALL') setSelectedEvolutionInstanceId('ALL')
-                         else setSelectedEvolutionInstanceId((val ? String(val).trim() : null) || null)
-                       }}
-                       allowClear
-                     />
+                     {selectedProvider === 'twilio' ? (
+                       <Select
+                         value="TWILIO"
+                         placeholder="Número Twilio"
+                         style={{ minWidth: 220 }}
+                         disabled
+                         options={[
+                           {
+                             value: 'TWILIO',
+                             label: `Twilio - ${String(twilioConfig?.whatsapp_from || '').trim() || 'WhatsApp From não configurado'}`,
+                           },
+                         ]}
+                       />
+                     ) : selectedProvider === 'meta' ? (
+                       <Select
+                         value="META"
+                         placeholder="Meta Cloud API"
+                         style={{ minWidth: 220 }}
+                         disabled
+                         options={[
+                           {
+                             value: 'META',
+                             label: 'Meta Cloud API',
+                           },
+                         ]}
+                       />
+                     ) : (
+                       <Select
+                         value={selectedEvolutionInstanceId ?? undefined}
+                         placeholder="Instância Evolution"
+                         style={{ minWidth: 220 }}
+                         disabled={!selectedCampanha || !availableEvolutionInstances.length}
+                         options={[
+                           { value: 'ALL', label: 'TODAS AS INSTÂNCIAS (ALTERNAR)' },
+                           ...(availableEvolutionInstances || []).map((x: any) => {
+                             const status = String(x?.connectionStatus || '').toUpperCase()
+                             const nm = String(x?.name || x?.nome || x?.id)
+                             const num = String(x?.number || '').trim()
+                             const label = `${nm}${num ? ` - ${num}` : ''}${status ? ` (${status})` : ''}`
+                             return { value: String(x?.id ?? '').trim(), label }
+                           }),
+                         ]}
+                         onChange={(val) => {
+                           if (val === 'ALL') setSelectedEvolutionInstanceId('ALL')
+                           else setSelectedEvolutionInstanceId((val ? String(val).trim() : null) || null)
+                         }}
+                         allowClear
+                       />
+                     )}
                      <Tooltip title="Atualizar dados e respostas da campanha">
                          <Button
                             onClick={handleAtualizarCampanha}

@@ -7,8 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "lint": "eslint src --ext ts,tsx --report-unused-disable-directives",
-    "type-check": "tsc --noEmit",
+    "lint": "npx --yes eslint src --report-unused-disable-directives",
+    "type-check": "npx --yes tsc --noEmit",
+    "mcp:postgres": "node scripts/postgres-mcp-server.mjs",
     "smoke": "powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1",
     "smoke:dev": "powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 -IncludeDev",
     "smoke:full": "powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 -IncludeDev -TenantChecks",
@@ -29,6 +30,7 @@
     "zustand": "^4.5.5"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
     "@types/echarts": "^4.9.22",
     "@types/node": "^25.0.2",
     "@types/react": "^18.3.12",
@@ -37,6 +39,7 @@
     "@typescript-eslint/parser": "^8.13.0",
     "@vitejs/plugin-react-swc": "^3.11.0",
     "eslint": "^9.15.0",
+    "pg": "^8.13.1",
     "terser": "^5.44.1",
     "typescript": "^5.6.3",
     "vite": "^7.2.2"

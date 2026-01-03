@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Table, Button, Space, message, Dropdown, Checkbox } from 'antd'
+import { Table, Button, Space, Dropdown, Checkbox, App } from 'antd'
 import { useApi } from '../context/ApiContext'
 import PerfilModal from '../components/PerfilModal'
 import { motion } from 'framer-motion'
@@ -14,6 +14,7 @@ export default function Perfil() {
   const [columnsMeta, setColumnsMeta] = useState<{ name: string; type: string; nullable: boolean }[]>([])
   const [visibleCols, setVisibleCols] = useState<Record<string, boolean>>({})
   const api = useApi()
+  const { message } = App.useApp()
 
   const IconEdit = () => (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25z" fill="currentColor"/><path d="M20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" fill="currentColor"/></svg>
@@ -122,7 +123,7 @@ export default function Perfil() {
         loading={loading}
         dataSource={data}
         columns={visibleColumns as any}
-        rowKey={(r) => r.IdPerfil || JSON.stringify(r)}
+        rowKey={(r, idx) => String((r as any).IdPerfil ?? idx)}
         bordered
         size="middle"
         className="ant-table-striped"

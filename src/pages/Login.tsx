@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { toast } from 'sonner'
-import { Form, Input, Button, Divider, Tag, Space, Modal, message } from 'antd'
+import { Form, Input, Button, Divider, Tag, Space, Modal, App } from 'antd'
 import { UserOutlined, LockOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/authStore'
@@ -21,6 +21,7 @@ export default function Login() {
   const [form] = Form.useForm()
   const api = useApi()
   const [loginLogoSrc, setLoginLogoSrc] = useState<string | null>(null)
+  const { message } = App.useApp()
 
   const onFinish = async (values: LoginFormValues) => {
     setLoading(true)

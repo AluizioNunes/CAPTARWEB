@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Table, Button, Modal, Form, Switch, message, Space, Card, Row, Col } from 'antd'
+import { Table, Button, Modal, Form, Switch, Space, Card, Row, Col, App } from 'antd'
 import { useApi } from '../context/ApiContext'
 
 interface Permissao {
@@ -29,6 +29,7 @@ export default function Permissoes() {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form] = Form.useForm()
   const api = useApi()
+  const { message } = App.useApp()
 
   useEffect(() => {
     loadPermissoes()

@@ -16,7 +16,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres-init:/docker-entrypoint-initdb.d:ro
-    command: ["postgres", "-c", "timezone=${TZ}"]
+    command: ["postgres", "-c", "timezone=${TZ}", "-c", "max_connections=200"]
     networks:
       - captar-network
     healthcheck:
@@ -42,6 +42,7 @@ services:
       - DB_HOST=postgres
       - REDIS_HOST=redis
       - MONGO_HOST=mongodb
+      - WHATSAPP_MEDIA_BASE_URL=http://fastapi:8000
       - TZ=${TZ}
     volumes:
       - ./Backend/FastAPI/static:/app/static
@@ -94,9 +95,21 @@ services:
     env_file:
       - .env
     ports:
-      - "5500:80"
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
     volumes:
       - ./nginx:/etc/nginx/conf.d:ro
+      - ./letsencrypt:/etc/letsencrypt
+      - ./certbot-www:/var/www/certbot
+    command: >
+      sh -lc "set -e;
+      domain=\"$${DOMAIN_NAME:-itfact.com.br}\";
+      cert_dir=\"/etc/letsencrypt/live/$$domain\";
+      if [ ! -s \"$$cert_dir/fullchain.pem\" ] || [ ! -s \"$$cert_dir/privkey.pem\" ]; then
+        mkdir -p \"$$cert_dir\";
+        openssl req -x509 -nodes -newkey rsa:2048 -days 1 -sha256 -subj \"/CN=$$domain\" -addext \"subjectAltName=DNS:$$domain,DNS:www.$$domain\" -keyout \"$$cert_dir/privkey.pem\" -out \"$$cert_dir/fullchain.pem\";
+      fi;
+      nginx -g 'daemon off;'"
     depends_on:
       fastapi:
         condition: service_healthy
@@ -107,6 +120,46 @@ services:
     networks:
       - captar-network
     restart: unless-stopped
+
+  ngrok:
+    image: ngrok/ngrok:alpine
+    container_name: captar-ngrok
+    profiles:
+      - ngrok
+    env_file:
+      - .env
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+      - NGROK_REGION=${NGROK_REGION:-us}
+    command: ["http", "nginx:80"]
+    ports:
+      - "4040:4040"
+    depends_on:
+      nginx:
+        condition: service_started
+    networks:
+      - captar-network
+    restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: captar-certbot
+    labels:
+      - "com.captar.stack=captar"
+    env_file:
+      - .env
+    volumes:
+      - ./letsencrypt:/etc/letsencrypt
+      - ./certbot-www:/var/www/certbot
+    entrypoint: sh
+    command: >
+      -lc "certbot certonly --webroot -w /var/www/certbot
+      -d ${DOMAIN_NAME} -d www.${DOMAIN_NAME}
+      --email ${CERTBOT_EMAIL:-admin@itfact.com.br}
+      --agree-tos --non-interactive --keep-until-expiring"
+    networks:
+      - captar-network
+    restart: "no"
 
   nestjs:
     build:
@@ -158,9 +211,6 @@ services:
       - "com.captar.stack=captar"
     env_file:
       - .env
-    ports:
-      - "5672:5672"
-      - "15672:15672"
     networks:
       - captar-network
     restart: unless-stopped

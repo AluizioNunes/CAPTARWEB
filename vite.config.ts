@@ -24,12 +24,16 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: proxyTarget,
           changeOrigin: true,
-          secure: false
+          secure: false,
+          timeout: 120000,
+          proxyTimeout: 120000
         },
         '/static': {
           target: proxyTarget,
           changeOrigin: true,
-          secure: false
+          secure: false,
+          timeout: 120000,
+          proxyTimeout: 120000
         }
       },
       // HMR sem porta fixa para sincronizar com a porta ativa

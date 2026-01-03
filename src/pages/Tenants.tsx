@@ -286,7 +286,7 @@ export default function Tenants() {
         .tenants-table .ant-table-thead > tr > th .ant-table-column-title{ display:flex; justify-content:center; align-items:center; text-align:center; }
         .tenants-table .ant-table-tbody > tr > td{ font-family: 'Roboto Condensed', Arial, sans-serif; padding:2px 6px; line-height:0.95; height:22px; }
       `}</style>
-      <Table rowKey={(r) => r.IdTenant || JSON.stringify(r)} loading={loading} dataSource={data} columns={visibleColumns as any} bordered size="small" className="ant-table-striped tenants-table" />
+      <Table rowKey={(r, idx) => String((r as any).IdTenant ?? idx)} loading={loading} dataSource={data} columns={visibleColumns as any} bordered size="small" className="ant-table-striped tenants-table" />
       <TenantsModal
         open={modalOpen}
         initial={editing || undefined}

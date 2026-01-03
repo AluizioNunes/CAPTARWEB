@@ -309,6 +309,46 @@ CREATE TABLE IF NOT EXISTS captar.logs_sistema (
     CONSTRAINT fk_log_usuario FOREIGN KEY (usuario_id) REFERENCES captar.usuarios(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS captar."MetaAPI" (
+    "Id" SERIAL PRIMARY KEY,
+    "IdTenant" INTEGER NOT NULL,
+    "TenantSlug" TEXT,
+    "BaseUrl" TEXT,
+    "ApiVersion" TEXT,
+    "PhoneNumberId" TEXT,
+    "BusinessAccountId" TEXT,
+    "AccessToken" TEXT,
+    "WebhookVerifyToken" TEXT,
+    "AppSecret" TEXT,
+    "ValidateSignature" BOOLEAN DEFAULT FALSE,
+    "Enabled" BOOLEAN DEFAULT TRUE,
+    "CreatedAt" TIMESTAMP DEFAULT NOW(),
+    "UpdatedAt" TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS "idx_MetaAPI_IdTenant" ON captar."MetaAPI"("IdTenant");
+CREATE INDEX IF NOT EXISTS "idx_MetaAPI_TenantSlug" ON captar."MetaAPI"("TenantSlug");
+
+CREATE TABLE IF NOT EXISTS captar."MetaWhatsappAPI" (
+    "Id" SERIAL PRIMARY KEY,
+    "IdTenant" INTEGER NOT NULL,
+    "TenantSlug" TEXT,
+    "BaseUrl" TEXT,
+    "ApiVersion" TEXT,
+    "PhoneNumberId" TEXT,
+    "BusinessAccountId" TEXT,
+    "AccessToken" TEXT,
+    "WebhookVerifyToken" TEXT,
+    "AppSecret" TEXT,
+    "ValidateSignature" BOOLEAN DEFAULT FALSE,
+    "Enabled" BOOLEAN DEFAULT TRUE,
+    "CreatedAt" TIMESTAMP DEFAULT NOW(),
+    "UpdatedAt" TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS "idx_MetaWhatsappAPI_IdTenant" ON captar."MetaWhatsappAPI"("IdTenant");
+CREATE INDEX IF NOT EXISTS "idx_MetaWhatsappAPI_TenantSlug" ON captar."MetaWhatsappAPI"("TenantSlug");
+
 CREATE TABLE IF NOT EXISTS captar."EvolutionAPIFallback" (
     chave VARCHAR(255) PRIMARY KEY,
     valor TEXT

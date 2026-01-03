@@ -50,7 +50,7 @@ export default function Eleicoes() {
           loading={loading}
           dataSource={rows}
           columns={colsDef as any}
-          rowKey={r => r.IdEleicao ?? JSON.stringify(r)}
+          rowKey={(r, idx) => String((r as any).IdEleicao ?? idx)}
           pagination={{ pageSize: 10 }}
           scroll={{ y: 480 }}
           locale={{ emptyText: 'Nenhuma eleição' }}

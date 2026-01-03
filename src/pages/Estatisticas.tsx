@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Card, Row, Col, Statistic, Button, Spin, message, Table } from 'antd'
+import { Card, Row, Col, Statistic, Button, Spin, Table, App } from 'antd'
 import { DownloadOutlined } from '@ant-design/icons'
 import apiService from '../services/api'
 
@@ -18,6 +18,7 @@ interface DadosEstatisticas {
 export default function Estatisticas() {
   const [dados, setDados] = useState<DadosEstatisticas | null>(null)
   const [carregando, setCarregando] = useState(false)
+  const { message } = App.useApp()
 
   useEffect(() => {
     carregarEstatisticas()
